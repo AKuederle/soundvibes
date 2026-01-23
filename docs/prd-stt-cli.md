@@ -31,7 +31,7 @@ Linux users need a simple, offline, real-time voice-to-text tool that does not r
 - Errors are returned with actionable messages (missing model, no mic, unsupported device).
 
 ## CLI Spec (Draft)
-- Binary name: `stt`
+- Binary name: `sv` (SoundVibes)
 - Required flags:
   - `--model <path>`: path to a local whisper.cpp ggml model file.
 - Optional flags:

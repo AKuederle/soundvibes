@@ -1,6 +1,6 @@
-# Acceptance Tests: Offline STT CLI (sv)
+# Acceptance Tests: Soundvibes Offline Voice-to-Text CLI
 
-These tests validate the MVP behavior for the offline Linux CLI.
+These tests validate the product behavior for the offline Linux CLI.
 
 ## Environment
 - Linux x86_64 machine with a working microphone.

@@ -17,6 +17,7 @@ use crate::error::AppError;
 use crate::model::{self, ModelLanguage, ModelSize, ModelSpec};
 use crate::output;
 use crate::types::{AudioHost, InjectBackend, OutputFormat, OutputMode, VadMode};
+use crate::vad::VadContext;
 use crate::whisper::WhisperContext;
 
 #[derive(Debug, Clone)]
@@ -174,8 +175,19 @@ pub fn run_daemon_loop(
     let mut transcriber = deps
         .transcriber_factory
         .load(config.model_path.as_deref())?;
+
+    // Initialize VAD context for continuous mode
+    let vad_ctx = if config.vad == VadMode::Continuous {
+        let vad_path = config.vad_model_path.as_ref()
+            .ok_or_else(|| AppError::config("VAD model path required for continuous mode"))?;
+        Some(VadContext::from_file(vad_path)
+            .map_err(|e| AppError::runtime(e.to_string()))?)
+    } else {
+        None
+    };
+
     let vad = audio::VadConfig::new(
-        config.vad == VadMode::On,
+        config.vad == VadMode::On || config.vad == VadMode::Continuous,
         config.vad_silence_ms,
         config.vad_threshold,
         config.vad_chunk_ms,
@@ -281,6 +293,50 @@ pub fn run_daemon_loop(
         if recording {
             if let Some(active) = capture.as_mut() {
                 active.drain(&mut buffer);
+
+                // In continuous mode, check for completed speech segments
+                if let Some(ref vad) = vad_ctx {
+                    let segments = vad.detect_segments(&buffer, config.vad_silence_ms as u32);
+
+                    // If we have more than one segment, the first one is complete
+                    // (the last segment may still be in progress)
+                    if segments.len() > 1 {
+                        let (start, end) = segments[0];
+                        let start_sample = (start * config.sample_rate as f32) as usize;
+                        let end_sample = (end * config.sample_rate as f32) as usize;
+
+                        // Extract and transcribe the completed segment
+                        if end_sample > start_sample && end_sample <= buffer.len() {
+                            let segment_samples: Vec<f32> = buffer[start_sample..end_sample].to_vec();
+                            let duration_ms = audio::samples_to_ms(segment_samples.len(), config.sample_rate);
+
+                            if !segment_samples.is_empty() {
+                                utterance_index += 1;
+                                match transcriber.transcribe(&segment_samples, Some(&config.language)) {
+                                    Ok(transcript) => {
+                                        if !transcript.is_empty() {
+                                            let _ = emit_transcript(config, output, &transcript, audio::SegmentInfo {
+                                                index: utterance_index,
+                                                duration_ms,
+                                            });
+                                        }
+                                    }
+                                    Err(err) => {
+                                        output.stderr(&format!("Transcription error: {err}"));
+                                    }
+                                }
+                            }
+
+                            // Remove processed audio from buffer, keeping from next segment onward
+                            let keep_from = if segments.len() > 1 {
+                                (segments[1].0 * config.sample_rate as f32) as usize
+                            } else {
+                                end_sample
+                            };
+                            buffer.drain(..keep_from.min(buffer.len()));
+                        }
+                    }
+                }
             }
         }
     }

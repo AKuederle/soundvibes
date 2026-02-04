@@ -89,24 +89,9 @@ fn try_ydotool(text: &str) -> Result<Option<String>, OutputError> {
         ));
     }
 
-    // Use clipboard paste for instant injection (avoids modifier key conflicts)
-    // Copy text to clipboard
-    let mut child = Command::new("wl-copy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| OutputError::new(format!("failed to run wl-copy: {e}")))?;
-
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        let _ = stdin.write_all(text.as_bytes());
-    }
-    let _ = child.wait();
-
-    // Simulate Ctrl+V to paste (keycode 47=V, 29=LCtrl)
-    // 29:1 = Ctrl down, 47:1 = V down, 47:0 = V up, 29:0 = Ctrl up
     match run_command(
         "ydotool",
-        &["key", "29:1", "47:1", "47:0", "29:0"],
+        &["type", "-d", "0", "--", text],
         "install ydotool and run `systemctl --user start ydotool.service`",
     ) {
         Ok(()) => Ok(None),

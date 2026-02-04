@@ -1177,6 +1177,7 @@ dependencies = [
  "cmake",
  "cpal",
  "hound",
+ "libc",
  "ringbuf",
  "serde",
  "serde_json",

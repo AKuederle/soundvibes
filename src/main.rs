@@ -9,7 +9,7 @@ use sv::audio;
 use sv::daemon;
 use sv::error::AppError;
 use sv::model::{model_language_for_transcription, ModelLanguage, ModelSize, ModelSpec};
-use sv::types::{AudioHost, OutputFormat, OutputMode, VadMode, VadSetting};
+use sv::types::{AudioHost, InjectBackend, OutputFormat, OutputMode, VadMode, VadSetting};
 
 #[derive(Parser, Debug)]
 #[command(name = "sv", version, about = "Offline speech-to-text CLI")]
@@ -40,6 +40,9 @@ struct Cli {
 
     #[arg(long, default_value = "inject", value_name = "MODE", global = true)]
     mode: OutputMode,
+
+    #[arg(long, default_value = "auto", value_name = "BACKEND", global = true)]
+    inject_backend: InjectBackend,
 
     #[arg(long, default_value = "on", value_name = "MODE", global = true)]
     vad: VadMode,
@@ -160,6 +163,7 @@ struct Config {
     sample_rate: u32,
     format: OutputFormat,
     mode: OutputMode,
+    inject_backend: InjectBackend,
     vad: VadMode,
     vad_silence_ms: u64,
     vad_threshold: f32,
@@ -230,6 +234,13 @@ impl Config {
         } else {
             file.mode.unwrap_or(cli.mode)
         };
+
+        let inject_backend =
+            if matches.value_source("inject_backend") == Some(ValueSource::CommandLine) {
+                cli.inject_backend
+            } else {
+                file.inject_backend.unwrap_or(cli.inject_backend)
+            };
 
         let vad = if matches.value_source("vad") == Some(ValueSource::CommandLine) {
             cli.vad
@@ -308,6 +319,7 @@ impl Config {
             sample_rate,
             format,
             mode,
+            inject_backend,
             vad,
             vad_silence_ms,
             vad_threshold,
@@ -334,6 +346,7 @@ struct FileConfig {
     sample_rate: Option<u32>,
     format: Option<OutputFormat>,
     mode: Option<OutputMode>,
+    inject_backend: Option<InjectBackend>,
     vad: Option<VadSetting>,
     vad_silence_ms: Option<u64>,
     vad_threshold: Option<f32>,
@@ -436,6 +449,7 @@ fn main() {
             sample_rate: config.sample_rate,
             format: config.format,
             mode: config.mode,
+            inject_backend: config.inject_backend,
             vad: config.vad,
             vad_silence_ms: config.vad_silence_ms,
             vad_threshold: config.vad_threshold,

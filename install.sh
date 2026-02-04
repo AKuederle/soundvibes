@@ -240,15 +240,38 @@ install_deps() {
 # Install text injection tools
 install_text_injection() {
     print_header "Text Injection Tools"
-    
+
+    # Check for ydotool first (works on both Wayland and X11, recommended for KDE Plasma)
+    if command_exists ydotool; then
+        print_success "ydotool is already installed (recommended, works on all desktops)"
+    else
+        print_info "ydotool is recommended for universal text injection (works on KDE Plasma, GNOME, X11)"
+        print_info "To install ydotool:"
+        case "$DISTRO" in
+            ubuntu|debian)
+                print_info "  sudo apt-get install ydotool"
+                ;;
+            arch|manjaro)
+                print_info "  sudo pacman -S ydotool"
+                ;;
+            fedora)
+                print_info "  sudo dnf install ydotool"
+                ;;
+            *)
+                print_info "  Check your distribution's package manager"
+                ;;
+        esac
+        print_info "After installing, enable the daemon: sudo systemctl enable --now ydotool"
+    fi
+
     if [ -n "$WAYLAND_DISPLAY" ]; then
         print_info "Wayland display server detected"
-        
+
         if command_exists wtype; then
-            print_success "wtype is already installed"
+            print_success "wtype is already installed (fallback for Wayland)"
         else
-            print_info "Installing wtype for Wayland text injection..."
-            
+            print_info "Installing wtype for Wayland text injection (fallback)..."
+
             case "$DISTRO" in
                 ubuntu|debian)
                     # wtype is in Debian 12+ and Ubuntu 23.04+
@@ -272,15 +295,21 @@ install_text_injection() {
                     ;;
             esac
         fi
-        
+
+        # Note about KDE Plasma
+        if [ "$XDG_CURRENT_DESKTOP" = "KDE" ]; then
+            print_warn "KDE Plasma detected: wtype may not work due to missing protocol support"
+            print_info "Use ydotool instead: sudo pacman -S ydotool && sudo systemctl enable --now ydotool"
+        fi
+
     elif [ -n "$DISPLAY" ]; then
         print_info "X11 display server detected"
-        
+
         if command_exists xdotool; then
             print_success "xdotool is already installed"
         else
             print_info "Installing xdotool for X11 text injection..."
-            
+
             case "$DISTRO" in
                 ubuntu|debian)
                     sudo apt-get install -y xdotool
@@ -296,10 +325,10 @@ install_text_injection() {
                     ;;
             esac
         fi
-        
+
     else
         print_warn "Could not detect display server (neither Wayland nor X11)"
-        print_info "Text injection will not work. Install wtype (Wayland) or xdotool (X11) manually."
+        print_info "Text injection will not work. Install ydotool (universal), wtype (Wayland) or xdotool (X11) manually."
     fi
 }
 
@@ -436,11 +465,11 @@ setup_systemd() {
     fi
     
     mkdir -p "$SERVICE_DIR"
-    
+
     cat > "${SERVICE_DIR}/sv.service" << EOF
 [Unit]
-Description=SoundVibes daemon
-After=sound.target
+Description=SoundVibes speech-to-text daemon
+After=graphical-session.target
 
 [Service]
 Type=simple
@@ -449,17 +478,18 @@ Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 EOF
-    
+
     # Reload systemd
     systemctl --user daemon-reload
-    
+
     # Enable but don't start yet
     systemctl --user enable sv.service
-    
+
     print_success "Systemd service created and enabled"
-    print_info "Start the service with: systemctl --user start sv.service"
+    print_info "The service will start automatically when you log in to your graphical session"
+    print_info "Start now with: systemctl --user start sv.service"
     print_info "Or simply run: sv daemon start"
 }
 

@@ -16,7 +16,7 @@ use crate::audio;
 use crate::error::AppError;
 use crate::model::{self, ModelLanguage, ModelSize, ModelSpec};
 use crate::output;
-use crate::types::{AudioHost, OutputFormat, OutputMode, VadMode};
+use crate::types::{AudioHost, InjectBackend, OutputFormat, OutputMode, VadMode};
 use crate::whisper::WhisperContext;
 
 #[derive(Debug, Clone)]
@@ -29,6 +29,7 @@ pub struct DaemonConfig {
     pub sample_rate: u32,
     pub format: OutputFormat,
     pub mode: OutputMode,
+    pub inject_backend: InjectBackend,
     pub vad: VadMode,
     pub vad_silence_ms: u64,
     pub vad_threshold: f32,
@@ -345,7 +346,7 @@ fn emit_transcript(
     match config.mode {
         OutputMode::Stdout => emit_stdout(config.format, output, text, info),
         OutputMode::Inject => {
-            if let Err(err) = output::inject_text(text) {
+            if let Err(err) = output::inject_text(text, config.inject_backend) {
                 output.stderr(&format!("warn: {err}; falling back to stdout"));
                 emit_stdout(config.format, output, text, info)
             } else {
@@ -584,13 +585,13 @@ fn send_daemon_command(command: &str) -> Result<(), AppError> {
     let socket_path = daemon_socket_path()?;
     if !socket_path.exists() {
         return Err(AppError::runtime(format!(
-            "daemon socket not found at {}. Start it with `sv daemon start`",
+            "daemon socket not found at {}. Start it with `sv daemon start` or `systemctl --user start sv.service`",
             socket_path.display()
         )));
     }
     let mut stream = UnixStream::connect(&socket_path).map_err(|err| {
         AppError::runtime(format!(
-            "daemon socket unavailable at {}. Start it with `sv daemon start` ({err})",
+            "daemon socket unavailable at {}. Start it with `sv daemon start` or `systemctl --user start sv.service` ({err})",
             socket_path.display()
         ))
     })?;
@@ -872,6 +873,7 @@ mod tests {
             sample_rate: 16_000,
             format: OutputFormat::Plain,
             mode: OutputMode::Stdout,
+            inject_backend: InjectBackend::Auto,
             vad: VadMode::Off,
             vad_silence_ms: 800,
             vad_threshold: 0.015,

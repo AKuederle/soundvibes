@@ -1,0 +1,12 @@
+[Unit]
+Description=SoundVibes speech-to-text daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/sv daemon start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

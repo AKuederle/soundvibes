@@ -1,6 +1,16 @@
 use clap::ValueEnum;
 use serde::Deserialize;
 
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InjectBackend {
+    #[default]
+    Auto,
+    Ydotool,
+    Wtype,
+    Xdotool,
+}
+
 #[derive(Debug, Copy, Clone, ValueEnum, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {

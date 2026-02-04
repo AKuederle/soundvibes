@@ -1,6 +1,9 @@
 use std::env;
 use std::fmt;
+use std::path::Path;
 use std::process::Command;
+
+use crate::types::InjectBackend;
 
 #[derive(Debug)]
 pub struct OutputError {
@@ -21,14 +24,51 @@ impl fmt::Display for OutputError {
     }
 }
 
-pub fn inject_text(text: &str) -> Result<(), OutputError> {
+pub fn inject_text(text: &str, backend: InjectBackend) -> Result<(), OutputError> {
+    match backend {
+        InjectBackend::Ydotool => {
+            if let Some(err) = try_ydotool(text)? {
+                Err(OutputError::new(err))
+            } else {
+                Ok(())
+            }
+        }
+        InjectBackend::Wtype => {
+            if let Some(err) = try_wayland(text)? {
+                Err(OutputError::new(err))
+            } else {
+                Ok(())
+            }
+        }
+        InjectBackend::Xdotool => {
+            if let Some(err) = try_x11(text)? {
+                Err(OutputError::new(err))
+            } else {
+                Ok(())
+            }
+        }
+        InjectBackend::Auto => inject_text_auto(text),
+    }
+}
+
+fn inject_text_auto(text: &str) -> Result<(), OutputError> {
     let mut errors = Vec::new();
+
+    // Try ydotool first - works on both Wayland and X11 via kernel uinput
+    if let Some(err) = try_ydotool(text)? {
+        errors.push(err);
+    } else {
+        return Ok(());
+    }
+
+    // Try Wayland backend
     if let Some(err) = try_wayland(text)? {
         errors.push(err);
     } else {
         return Ok(());
     }
 
+    // Try X11 backend
     if let Some(err) = try_x11(text)? {
         errors.push(err);
     } else {
@@ -39,6 +79,30 @@ pub fn inject_text(text: &str) -> Result<(), OutputError> {
         "no supported injection backends available ({})",
         errors.join("; ")
     )))
+}
+
+fn try_ydotool(text: &str) -> Result<Option<String>, OutputError> {
+    if !has_ydotool() {
+        return Ok(Some("ydotoold not running".to_string()));
+    }
+
+    match run_command(
+        "ydotool",
+        &["type", "--", text],
+        "install ydotool and start ydotoold to enable universal text injection",
+    ) {
+        Ok(()) => Ok(None),
+        Err(err) => Ok(Some(format!("ydotool: {err}"))),
+    }
+}
+
+fn has_ydotool() -> bool {
+    let uid = unsafe { libc::getuid() };
+    let socket_paths = [
+        format!("/run/user/{}/.ydotool_socket", uid),
+        "/tmp/.ydotool_socket".to_string(),
+    ];
+    socket_paths.iter().any(|p| Path::new(p).exists())
 }
 
 fn try_wayland(text: &str) -> Result<Option<String>, OutputError> {

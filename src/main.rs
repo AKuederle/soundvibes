@@ -115,6 +115,8 @@ enum DaemonCommand {
         #[arg(long, value_name = "LANG")]
         model_language: ModelLanguage,
     },
+    #[command(name = "test-audio")]
+    TestAudio,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -127,6 +129,7 @@ enum CliMode {
         model_language: ModelLanguage,
     },
     ListDevices,
+    TestAudio,
 }
 
 fn resolve_cli_mode(cli: &Cli) -> CliMode {
@@ -147,6 +150,9 @@ fn resolve_cli_mode(cli: &Cli) -> CliMode {
             size,
             model_language,
         },
+        Some(CliCommand::Daemon {
+            command: DaemonCommand::TestAudio,
+        }) => CliMode::TestAudio,
         None => {
             if cli.list_devices {
                 CliMode::ListDevices
@@ -412,7 +418,7 @@ fn main() {
             }
             return;
         }
-        CliMode::RunDaemon | CliMode::ListDevices => {}
+        CliMode::RunDaemon | CliMode::ListDevices | CliMode::TestAudio => {}
     }
     let file_config = match load_config_file() {
         Ok(config) => config,
@@ -479,6 +485,8 @@ fn main() {
 
     let result = if config.list_devices {
         run_list_devices(&config)
+    } else if mode == CliMode::TestAudio {
+        run_test_audio(&config)
     } else {
         let model_path = prepared_model
             .as_ref()
@@ -555,6 +563,46 @@ fn run_list_devices(config: &Config) -> Result<(), AppError> {
         println!("  - {name}");
     }
     Ok(())
+}
+
+fn run_test_audio(config: &Config) -> Result<(), AppError> {
+    use std::io::Write;
+
+    let host = daemon::select_audio_host(config.audio_host)?;
+    audio::configure_alsa_logging(config.debug_audio);
+
+    let mut capture = audio::start_capture(&host, config.device.as_deref(), config.sample_rate)
+        .map_err(|err| AppError::audio(err.message))?;
+
+    let mut detector = audio::SpeechDetector::new(config.vad_threshold, 100, config.sample_rate);
+
+    println!("Testing audio levels. Threshold: {:.4}", config.vad_threshold);
+    println!("Speak to see if speech is detected. Press Ctrl+C to stop.\n");
+    println!("{:>10} {:>10} {:>12} {:>8}", "RMS", "Threshold", "Accumulated", "Detected");
+    println!("{:-<10} {:-<10} {:-<12} {:-<8}", "", "", "", "");
+
+    let mut buffer = Vec::new();
+    loop {
+        audio::drain_samples(&mut capture, &mut buffer);
+        if buffer.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            continue;
+        }
+
+        let analysis = detector.analyze(&buffer);
+        detector.process(&buffer);
+
+        print!(
+            "\r{:>10.6} {:>10.4} {:>12} {:>8}",
+            analysis.rms,
+            analysis.threshold,
+            format!("{}/{}", detector.speech_samples(), analysis.confirm_samples_needed),
+            if detector.is_detected() { "YES" } else { "no" }
+        );
+        std::io::stdout().flush().ok();
+
+        buffer.clear();
+    }
 }
 
 #[cfg(test)]

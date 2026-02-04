@@ -982,6 +982,7 @@ mod tests {
             dump_audio: false,
             vad_model_path: None,
             audio_feedback: false,
+            no_speech_timeout_ms: 0,
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);

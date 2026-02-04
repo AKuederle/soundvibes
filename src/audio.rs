@@ -297,8 +297,175 @@ pub fn trim_trailing_silence(samples: &[f32], sample_rate: u32, vad: &VadConfig)
 }
 
 pub fn rms_energy(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
     let sum_squares = samples.iter().map(|sample| sample * sample).sum::<f32>();
     (sum_squares / samples.len() as f32).sqrt()
+}
+
+/// Detects sustained speech in audio samples.
+/// Requires continuous speech above threshold for a minimum duration.
+#[derive(Debug)]
+pub struct SpeechDetector {
+    threshold: f32,
+    confirm_samples: usize,
+    speech_samples: usize,
+    detected: bool,
+    sample_rate: u32,
+}
+
+impl SpeechDetector {
+    /// Create a new speech detector.
+    /// - `threshold`: RMS energy threshold for speech (default 0.010)
+    /// - `confirm_ms`: How many ms of sustained speech required (default 100)
+    /// - `sample_rate`: Audio sample rate (default 16000)
+    pub fn new(threshold: f32, confirm_ms: u64, sample_rate: u32) -> Self {
+        let confirm_samples = (confirm_ms as f32 / 1000.0 * sample_rate as f32) as usize;
+        Self {
+            threshold,
+            confirm_samples,
+            speech_samples: 0,
+            detected: false,
+            sample_rate,
+        }
+    }
+
+    /// Reset the detector state (call when starting new recording)
+    pub fn reset(&mut self) {
+        self.speech_samples = 0;
+        self.detected = false;
+    }
+
+    /// Process new audio samples. Returns true once sustained speech is detected.
+    pub fn process(&mut self, samples: &[f32]) -> bool {
+        if self.detected {
+            return true;
+        }
+
+        let rms = rms_energy(samples);
+
+        if rms >= self.threshold {
+            self.speech_samples += samples.len();
+            if self.speech_samples >= self.confirm_samples {
+                self.detected = true;
+            }
+        } else {
+            // Reset on silence (require continuous speech)
+            self.speech_samples = 0;
+        }
+
+        self.detected
+    }
+
+    /// Check if sustained speech has been detected
+    pub fn is_detected(&self) -> bool {
+        self.detected
+    }
+
+    /// Get current accumulated speech samples (for debugging)
+    pub fn speech_samples(&self) -> usize {
+        self.speech_samples
+    }
+
+    /// Get the RMS of samples (for debugging)
+    pub fn analyze(&self, samples: &[f32]) -> SpeechAnalysis {
+        let rms = rms_energy(samples);
+        SpeechAnalysis {
+            rms,
+            threshold: self.threshold,
+            above_threshold: rms >= self.threshold,
+            samples_len: samples.len(),
+            accumulated_speech_samples: self.speech_samples,
+            confirm_samples_needed: self.confirm_samples,
+            detected: self.detected,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SpeechAnalysis {
+    pub rms: f32,
+    pub threshold: f32,
+    pub above_threshold: bool,
+    pub samples_len: usize,
+    pub accumulated_speech_samples: usize,
+    pub confirm_samples_needed: usize,
+    pub detected: bool,
+}
+
+impl std::fmt::Display for SpeechAnalysis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RMS: {:.6} (threshold: {:.6}, {}), samples: {}, accumulated: {}/{}, detected: {}",
+            self.rms,
+            self.threshold,
+            if self.above_threshold { "ABOVE" } else { "below" },
+            self.samples_len,
+            self.accumulated_speech_samples,
+            self.confirm_samples_needed,
+            self.detected
+        )
+    }
+}
+
+#[cfg(test)]
+mod speech_detector_tests {
+    use super::*;
+
+    #[test]
+    fn test_silence_not_detected() {
+        let mut detector = SpeechDetector::new(0.01, 100, 16000);
+
+        // 100ms of silence (1600 samples at 16kHz)
+        let silence = vec![0.0f32; 1600];
+
+        assert!(!detector.process(&silence));
+        assert!(!detector.is_detected());
+    }
+
+    #[test]
+    fn test_sustained_speech_detected() {
+        let mut detector = SpeechDetector::new(0.01, 100, 16000);
+
+        // Generate 100ms of "speech" at RMS ~0.1
+        let speech: Vec<f32> = (0..1600).map(|i| 0.14 * (i as f32 * 0.1).sin()).collect();
+
+        assert!(detector.process(&speech));
+        assert!(detector.is_detected());
+    }
+
+    #[test]
+    fn test_brief_noise_not_detected() {
+        let mut detector = SpeechDetector::new(0.01, 100, 16000);
+
+        // 50ms of noise (not enough to confirm)
+        let noise: Vec<f32> = (0..800).map(|i| 0.14 * (i as f32 * 0.1).sin()).collect();
+        assert!(!detector.process(&noise));
+
+        // Then silence resets
+        let silence = vec![0.0f32; 800];
+        assert!(!detector.process(&silence));
+
+        // Accumulated should be reset
+        assert_eq!(detector.speech_samples(), 0);
+    }
+
+    #[test]
+    fn test_reset() {
+        let mut detector = SpeechDetector::new(0.01, 100, 16000);
+
+        // Detect speech
+        let speech: Vec<f32> = (0..1600).map(|i| 0.14 * (i as f32 * 0.1).sin()).collect();
+        detector.process(&speech);
+        assert!(detector.is_detected());
+
+        // Reset
+        detector.reset();
+        assert!(!detector.is_detected());
+        assert_eq!(detector.speech_samples(), 0);
+    }
 }
 
 fn duration_to_samples(sample_rate: u32, duration: Duration) -> usize {

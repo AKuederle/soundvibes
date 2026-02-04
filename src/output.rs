@@ -1,9 +1,32 @@
 use std::env;
 use std::fmt;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::types::InjectBackend;
+
+/// Known terminal emulator window classes (lowercase for comparison)
+const TERMINAL_CLASSES: &[&str] = &[
+    "konsole",
+    "org.kde.konsole",
+    "kitty",
+    "alacritty",
+    "gnome-terminal",
+    "org.gnome.terminal",
+    "xterm",
+    "urxvt",
+    "terminator",
+    "tilix",
+    "xfce4-terminal",
+    "mate-terminal",
+    "lxterminal",
+    "st",
+    "foot",
+    "wezterm",
+    "com.mitchellh.ghostty",
+    "ghostty",
+];
 
 #[derive(Debug)]
 pub struct OutputError {
@@ -54,7 +77,14 @@ pub fn inject_text(text: &str, backend: InjectBackend) -> Result<(), OutputError
 fn inject_text_auto(text: &str) -> Result<(), OutputError> {
     let mut errors = Vec::new();
 
-    // Try ydotool first - works on both Wayland and X11 via kernel uinput
+    // Try clipboard paste first - instant and avoids modifier key conflicts
+    if let Some(err) = try_clipboard_paste(text)? {
+        errors.push(err);
+    } else {
+        return Ok(());
+    }
+
+    // Try ydotool - works on both Wayland and X11 via kernel uinput
     if let Some(err) = try_ydotool(text)? {
         errors.push(err);
     } else {
@@ -79,6 +109,88 @@ fn inject_text_auto(text: &str) -> Result<(), OutputError> {
         "no supported injection backends available ({})",
         errors.join("; ")
     )))
+}
+
+/// Try clipboard paste: copy to clipboard, then simulate Ctrl+V or Ctrl+Shift+V
+fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
+    // Check if we have the required tools
+    if !has_wayland_session() {
+        return Ok(Some("clipboard paste requires Wayland session".to_string()));
+    }
+
+    // Copy text to clipboard using wl-copy
+    let mut child = match Command::new("wl-copy")
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some("wl-copy not found; install wl-clipboard".to_string()));
+        }
+        Err(e) => {
+            return Ok(Some(format!("failed to run wl-copy: {e}")));
+        }
+    };
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let _ = child.wait();
+
+    // Detect if focused window is a terminal
+    let is_terminal = is_focused_window_terminal();
+
+    // Check if ydotool is available for key simulation
+    if !has_ydotool() {
+        return Ok(Some(
+            "clipboard paste requires ydotool for key simulation".to_string()
+        ));
+    }
+
+    // Simulate paste: Ctrl+V for normal apps, Ctrl+Shift+V for terminals
+    // Key codes: 29=LCtrl, 42=LShift, 47=V
+    let key_sequence = if is_terminal {
+        // Ctrl+Shift+V: Ctrl down, Shift down, V down, V up, Shift up, Ctrl up
+        vec!["29:1", "42:1", "47:1", "47:0", "42:0", "29:0"]
+    } else {
+        // Ctrl+V: Ctrl down, V down, V up, Ctrl up
+        vec!["29:1", "47:1", "47:0", "29:0"]
+    };
+
+    let args: Vec<&str> = std::iter::once("key")
+        .chain(key_sequence.into_iter())
+        .collect();
+
+    match Command::new("ydotool").args(&args).status() {
+        Ok(status) if status.success() => Ok(None),
+        Ok(status) => Ok(Some(format!("ydotool exited with status {status}"))),
+        Err(e) => Ok(Some(format!("failed to run ydotool: {e}"))),
+    }
+}
+
+/// Check if the currently focused window is a terminal emulator
+fn is_focused_window_terminal() -> bool {
+    // Query KWin via DBus for focused window info
+    let output = Command::new("qdbus")
+        .args(["org.kde.KWin", "/KWin", "org.kde.KWin.queryWindowInfo"])
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return false, // Can't detect, assume not terminal
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Look for resourceClass line
+    for line in stdout.lines() {
+        if let Some(class) = line.strip_prefix("resourceClass: ") {
+            let class_lower = class.to_lowercase();
+            return TERMINAL_CLASSES.iter().any(|t| class_lower.contains(t));
+        }
+    }
+
+    false
 }
 
 fn try_ydotool(text: &str) -> Result<Option<String>, OutputError> {

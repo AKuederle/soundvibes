@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
+use regex::Regex;
+
 #[allow(
     dead_code,
     non_camel_case_types,
@@ -201,8 +203,16 @@ impl WhisperContext {
                 output.push(' ');
             }
         }
-        Ok(output.trim().to_string())
+        Ok(filter_nonverbal(&output))
     }
+}
+
+/// Remove non-verbal annotations like [no sound], (metal clinking), *sighs*, etc.
+fn filter_nonverbal(text: &str) -> String {
+    let re = Regex::new(r"\s*[\[\(][^\]\)]*[\]\)]|\s*\*[^*]+\*").unwrap();
+    let filtered = re.replace_all(text, "");
+    // Clean up extra whitespace
+    filtered.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl Drop for WhisperContext {

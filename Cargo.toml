@@ -20,6 +20,7 @@ chrono = "0.4.39"
 hound = "3.5.1"
 signal-hook = "0.3.17"
 ureq = "2.12.1"
+regex = "1"
 
 [dev-dependencies]
 serde_json = "1.0.117"

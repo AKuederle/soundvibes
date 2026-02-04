@@ -199,6 +199,8 @@ pub fn run_daemon_loop(
     let mut speech_samples: usize = 0;
     // Require 100ms of speech to count as "speech detected"
     let speech_confirm_samples = (0.1 * config.sample_rate as f32) as usize;
+    // Grace period after recording starts to ignore audio feedback pickup (500ms)
+    let speech_detection_grace_ms: u64 = if config.audio_feedback { 500 } else { 0 };
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -312,15 +314,21 @@ pub fn run_daemon_loop(
                     let new_audio = &buffer[prev_len..];
                     let rms = audio::rms_energy(new_audio);
 
-                    // Track sustained speech for no-speech timeout
-                    if rms >= config.vad_threshold {
-                        speech_samples += new_samples;
-                        if speech_samples >= speech_confirm_samples {
-                            speech_detected = true;
+                    // Track sustained speech for no-speech timeout (skip grace period for audio feedback)
+                    let in_grace_period = recording_started
+                        .map(|t| (t.elapsed().as_millis() as u64) < speech_detection_grace_ms)
+                        .unwrap_or(false);
+
+                    if !in_grace_period {
+                        if rms >= config.vad_threshold {
+                            speech_samples += new_samples;
+                            if speech_samples >= speech_confirm_samples {
+                                speech_detected = true;
+                            }
+                        } else {
+                            // Reset on silence (require continuous speech)
+                            speech_samples = 0;
                         }
-                    } else {
-                        // Reset on silence (require continuous speech)
-                        speech_samples = 0;
                     }
 
                     // In continuous mode, detect silence at end of buffer
@@ -337,11 +345,11 @@ pub fn run_daemon_loop(
                         if trailing_silence_samples >= silence_threshold_samples {
                             let speech_end = buffer.len() - trailing_silence_samples;
                             if speech_end > 0 {
-                                let speech_samples = &buffer[..speech_end];
-                                let duration_ms = audio::samples_to_ms(speech_samples.len(), config.sample_rate);
+                                let audio_segment = &buffer[..speech_end];
+                                let duration_ms = audio::samples_to_ms(audio_segment.len(), config.sample_rate);
 
                                 utterance_index += 1;
-                                match transcriber.transcribe(speech_samples, Some(&config.language)) {
+                                match transcriber.transcribe(audio_segment, Some(&config.language)) {
                                     Ok(transcript) => {
                                         if !transcript.trim().is_empty() {
                                             let _ = emit_transcript(config, output, &transcript, audio::SegmentInfo {
@@ -355,9 +363,13 @@ pub fn run_daemon_loop(
                                     }
                                 }
 
-                                // Clear buffer, keep only recent silence for next segment
+                                // Clear buffer and reset speech detection for next utterance
                                 buffer.clear();
                                 trailing_silence_samples = 0;
+                                // Reset speech detection so timeout can trigger if user stops talking
+                                speech_detected = false;
+                                speech_samples = 0;
+                                recording_started = Some(std::time::Instant::now());
                             }
                         }
                     }
@@ -367,7 +379,7 @@ pub fn run_daemon_loop(
                 if config.no_speech_timeout_ms > 0
                     && !speech_detected
                     && recording_started
-                        .map(|t| t.elapsed().as_millis() as u64 >= config.no_speech_timeout_ms)
+                        .map(|t| (t.elapsed().as_millis() as u64) >= config.no_speech_timeout_ms)
                         .unwrap_or(false)
                 {
                     recording = false;

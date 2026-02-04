@@ -86,7 +86,7 @@ struct Cli {
     #[arg(long, default_value_t = false, global = true)]
     audio_feedback: bool,
 
-    #[arg(long, default_value_t = 5000, global = true)]
+    #[arg(long, default_value_t = 3000, global = true)]
     no_speech_timeout_ms: u64,
 
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set, global = true)]

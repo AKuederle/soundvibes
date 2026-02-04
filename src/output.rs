@@ -161,11 +161,16 @@ fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
         .chain(key_sequence.into_iter())
         .collect();
 
-    match Command::new("ydotool").args(&args).status() {
+    let result = match Command::new("ydotool").args(&args).status() {
         Ok(status) if status.success() => Ok(None),
         Ok(status) => Ok(Some(format!("ydotool exited with status {status}"))),
         Err(e) => Ok(Some(format!("failed to run ydotool: {e}"))),
-    }
+    };
+
+    // Clear clipboard to avoid polluting clipboard history
+    let _ = Command::new("wl-copy").arg("--clear").status();
+
+    result
 }
 
 /// Check if the currently focused window is a terminal emulator

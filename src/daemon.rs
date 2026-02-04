@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::audio;
 use crate::error::AppError;
+use crate::feedback;
 use crate::model::{self, ModelLanguage, ModelSize, ModelSpec};
 use crate::output;
 use crate::types::{AudioHost, InjectBackend, OutputFormat, OutputMode, VadMode};
@@ -38,6 +39,7 @@ pub struct DaemonConfig {
     pub debug_vad: bool,
     pub dump_audio: bool,
     pub vad_model_path: Option<PathBuf>,
+    pub audio_feedback: bool,
 }
 
 pub trait DaemonOutput {
@@ -220,6 +222,9 @@ pub fn run_daemon_loop(
                         &mut utterance_index,
                         output,
                     )?;
+                    if config.audio_feedback {
+                        feedback::play_stop_sound();
+                    }
                 } else {
                     let new_capture = deps
                         .audio
@@ -235,6 +240,9 @@ pub fn run_daemon_loop(
                     trailing_silence_samples = 0;
                     capture = Some(new_capture);
                     output.stdout("Toggle on. Recording...");
+                    if config.audio_feedback {
+                        feedback::play_start_sound();
+                    }
                 }
             }
             Ok(ControlEvent::Stop) => {
@@ -933,6 +941,7 @@ mod tests {
             debug_vad: false,
             dump_audio: false,
             vad_model_path: None,
+            audio_feedback: false,
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);

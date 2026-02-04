@@ -83,6 +83,9 @@ struct Cli {
     #[arg(long, default_value_t = false, global = true)]
     dump_audio: bool,
 
+    #[arg(long, default_value_t = false, global = true)]
+    audio_feedback: bool,
+
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set, global = true)]
     download_model: bool,
 
@@ -172,6 +175,7 @@ struct Config {
     debug_vad: bool,
     list_devices: bool,
     dump_audio: bool,
+    audio_feedback: bool,
 }
 
 impl Config {
@@ -294,6 +298,13 @@ impl Config {
             file.dump_audio.unwrap_or(cli.dump_audio)
         };
 
+        let audio_feedback =
+            if matches.value_source("audio_feedback") == Some(ValueSource::CommandLine) {
+                cli.audio_feedback
+            } else {
+                file.audio_feedback.unwrap_or(cli.audio_feedback)
+            };
+
         let download_model =
             if matches.value_source("download_model") == Some(ValueSource::CommandLine) {
                 cli.download_model
@@ -328,6 +339,7 @@ impl Config {
             debug_vad,
             list_devices,
             dump_audio,
+            audio_feedback,
         }
     }
 }
@@ -355,6 +367,7 @@ struct FileConfig {
     debug_vad: Option<bool>,
     list_devices: Option<bool>,
     dump_audio: Option<bool>,
+    audio_feedback: Option<bool>,
 }
 
 fn main() {
@@ -475,6 +488,7 @@ fn main() {
             debug_vad: config.debug_vad,
             dump_audio: config.dump_audio,
             vad_model_path,
+            audio_feedback: config.audio_feedback,
         };
         let deps = daemon::DaemonDeps::default();
         let mut output = daemon::StdoutOutput;

@@ -4,7 +4,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/sv daemon start --vad continuous --vad-silence-ms 600
+ExecStart=%h/.local/bin/sv daemon start --vad continuous --vad-silence-ms 600 --audio-feedback
 Restart=on-failure
 RestartSec=5
 

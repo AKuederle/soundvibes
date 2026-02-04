@@ -193,9 +193,12 @@ pub fn run_daemon_loop(
     // For continuous mode: track silence at end of buffer
     let mut trailing_silence_samples: usize = 0;
     let silence_threshold_samples = (config.vad_silence_ms as f32 / 1000.0 * config.sample_rate as f32) as usize;
-    // For no-speech timeout: track when recording started and if speech detected
+    // For no-speech timeout: track when recording started and sustained speech
     let mut recording_started: Option<std::time::Instant> = None;
     let mut speech_detected = false;
+    let mut speech_samples: usize = 0;
+    // Require 100ms of speech to count as "speech detected"
+    let speech_confirm_samples = (0.1 * config.sample_rate as f32) as usize;
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -244,6 +247,7 @@ pub fn run_daemon_loop(
                     trailing_silence_samples = 0;
                     recording_started = Some(std::time::Instant::now());
                     speech_detected = false;
+                    speech_samples = 0;
                     capture = Some(new_capture);
                     output.stdout("Toggle on. Recording...");
                     if config.audio_feedback {
@@ -308,8 +312,15 @@ pub fn run_daemon_loop(
                     let new_audio = &buffer[prev_len..];
                     let rms = audio::rms_energy(new_audio);
 
+                    // Track sustained speech for no-speech timeout
                     if rms >= config.vad_threshold {
-                        speech_detected = true;
+                        speech_samples += new_samples;
+                        if speech_samples >= speech_confirm_samples {
+                            speech_detected = true;
+                        }
+                    } else {
+                        // Reset on silence (require continuous speech)
+                        speech_samples = 0;
                     }
 
                     // In continuous mode, detect silence at end of buffer

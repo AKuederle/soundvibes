@@ -83,13 +83,16 @@ fn inject_text_auto(text: &str) -> Result<(), OutputError> {
 
 fn try_ydotool(text: &str) -> Result<Option<String>, OutputError> {
     if !has_ydotool() {
-        return Ok(Some("ydotoold not running".to_string()));
+        return Ok(Some(
+            "ydotoold not running; start with `systemctl --user start ydotool.service` \
+             (see README for uinput permissions setup)".to_string()
+        ));
     }
 
     match run_command(
         "ydotool",
         &["type", "--", text],
-        "install ydotool and start ydotoold to enable universal text injection",
+        "install ydotool and run `systemctl --user start ydotool.service`",
     ) {
         Ok(()) => Ok(None),
         Err(err) => Ok(Some(format!("ydotool: {err}"))),

@@ -247,12 +247,16 @@ setup_ydotool_permissions() {
 
     print_info "Setting up ydotool permissions..."
 
-    # Check if udev rule exists
+    # Check if udev rule exists and has correct content
     UDEV_RULE="/etc/udev/rules.d/80-uinput.rules"
-    if [ ! -f "$UDEV_RULE" ]; then
+    UDEV_RULE_CONTENT='KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"'
+    if [ ! -f "$UDEV_RULE" ] || ! grep -q "static_node=uinput" "$UDEV_RULE" 2>/dev/null; then
         print_info "Creating udev rule for uinput access..."
-        echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee "$UDEV_RULE" > /dev/null
+        echo "$UDEV_RULE_CONTENT" | sudo tee "$UDEV_RULE" > /dev/null
         sudo udevadm control --reload-rules
+        # Reload uinput module to apply new permissions
+        sudo modprobe -r uinput 2>/dev/null || true
+        sudo modprobe uinput
         sudo udevadm trigger
         print_success "udev rule created"
     fi

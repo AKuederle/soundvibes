@@ -93,8 +93,9 @@ sudo apt install ydotool            # Debian/Ubuntu
 sudo dnf install ydotool            # Fedora
 
 # 2. Set up uinput permissions (required for non-root access)
-echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/80-uinput.rules
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/80-uinput.rules
 sudo udevadm control --reload-rules
+sudo modprobe -r uinput && sudo modprobe uinput  # Reload module to apply permissions
 sudo udevadm trigger
 
 # 3. Add yourself to input group

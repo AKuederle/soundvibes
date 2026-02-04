@@ -37,6 +37,7 @@ pub struct DaemonConfig {
     pub debug_audio: bool,
     pub debug_vad: bool,
     pub dump_audio: bool,
+    pub vad_model_path: Option<PathBuf>,
 }
 
 pub trait DaemonOutput {
@@ -881,6 +882,7 @@ mod tests {
             debug_audio: false,
             debug_vad: false,
             dump_audio: false,
+            vad_model_path: None,
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);

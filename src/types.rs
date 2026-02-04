@@ -50,6 +50,7 @@ impl AudioHost {
 pub enum VadMode {
     On,
     Off,
+    Continuous,
 }
 
 #[derive(Debug, Deserialize)]

@@ -457,6 +457,7 @@ fn main() {
             debug_audio: config.debug_audio,
             debug_vad: config.debug_vad,
             dump_audio: config.dump_audio,
+            vad_model_path: None,
         };
         let deps = daemon::DaemonDeps::default();
         let mut output = daemon::StdoutOutput;

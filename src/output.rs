@@ -91,7 +91,7 @@ fn try_ydotool(text: &str) -> Result<Option<String>, OutputError> {
 
     match run_command(
         "ydotool",
-        &["type", "--", text],
+        &["type", "-d", "1", "--", text],
         "install ydotool and run `systemctl --user start ydotool.service`",
     ) {
         Ok(()) => Ok(None),

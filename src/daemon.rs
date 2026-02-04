@@ -40,6 +40,7 @@ pub struct DaemonConfig {
     pub dump_audio: bool,
     pub vad_model_path: Option<PathBuf>,
     pub audio_feedback: bool,
+    pub no_speech_timeout_ms: u64,
 }
 
 pub trait DaemonOutput {
@@ -192,6 +193,9 @@ pub fn run_daemon_loop(
     // For continuous mode: track silence at end of buffer
     let mut trailing_silence_samples: usize = 0;
     let silence_threshold_samples = (config.vad_silence_ms as f32 / 1000.0 * config.sample_rate as f32) as usize;
+    // For no-speech timeout: track when recording started and if speech detected
+    let mut recording_started: Option<std::time::Instant> = None;
+    let mut speech_detected = false;
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -238,6 +242,8 @@ pub fn run_daemon_loop(
                     recording = true;
                     buffer.clear();
                     trailing_silence_samples = 0;
+                    recording_started = Some(std::time::Instant::now());
+                    speech_detected = false;
                     capture = Some(new_capture);
                     output.stdout("Toggle on. Recording...");
                     if config.audio_feedback {
@@ -297,46 +303,69 @@ pub fn run_daemon_loop(
                 active.drain(&mut buffer);
                 let new_samples = buffer.len() - prev_len;
 
-                // In continuous mode, detect silence at end of buffer using energy-based VAD
-                if config.vad == VadMode::Continuous && new_samples > 0 {
-                    // Check energy of new samples
+                // Check for speech in new samples
+                if new_samples > 0 {
                     let new_audio = &buffer[prev_len..];
                     let rms = audio::rms_energy(new_audio);
 
-                    if rms < config.vad_threshold {
-                        // Silence detected, accumulate
-                        trailing_silence_samples += new_samples;
-                    } else {
-                        // Speech detected, reset silence counter
-                        trailing_silence_samples = 0;
+                    if rms >= config.vad_threshold {
+                        speech_detected = true;
                     }
 
-                    // If we have enough silence and some speech before it, transcribe
-                    if trailing_silence_samples >= silence_threshold_samples {
-                        let speech_end = buffer.len() - trailing_silence_samples;
-                        if speech_end > 0 {
-                            let speech_samples = &buffer[..speech_end];
-                            let duration_ms = audio::samples_to_ms(speech_samples.len(), config.sample_rate);
-
-                            utterance_index += 1;
-                            match transcriber.transcribe(speech_samples, Some(&config.language)) {
-                                Ok(transcript) => {
-                                    if !transcript.trim().is_empty() {
-                                        let _ = emit_transcript(config, output, &transcript, audio::SegmentInfo {
-                                            index: utterance_index,
-                                            duration_ms,
-                                        });
-                                    }
-                                }
-                                Err(err) => {
-                                    output.stderr(&format!("Transcription error: {err}"));
-                                }
-                            }
-
-                            // Clear buffer, keep only recent silence for next segment
-                            buffer.clear();
+                    // In continuous mode, detect silence at end of buffer
+                    if config.vad == VadMode::Continuous {
+                        if rms < config.vad_threshold {
+                            // Silence detected, accumulate
+                            trailing_silence_samples += new_samples;
+                        } else {
+                            // Speech detected, reset silence counter
                             trailing_silence_samples = 0;
                         }
+
+                        // If we have enough silence and some speech before it, transcribe
+                        if trailing_silence_samples >= silence_threshold_samples {
+                            let speech_end = buffer.len() - trailing_silence_samples;
+                            if speech_end > 0 {
+                                let speech_samples = &buffer[..speech_end];
+                                let duration_ms = audio::samples_to_ms(speech_samples.len(), config.sample_rate);
+
+                                utterance_index += 1;
+                                match transcriber.transcribe(speech_samples, Some(&config.language)) {
+                                    Ok(transcript) => {
+                                        if !transcript.trim().is_empty() {
+                                            let _ = emit_transcript(config, output, &transcript, audio::SegmentInfo {
+                                                index: utterance_index,
+                                                duration_ms,
+                                            });
+                                        }
+                                    }
+                                    Err(err) => {
+                                        output.stderr(&format!("Transcription error: {err}"));
+                                    }
+                                }
+
+                                // Clear buffer, keep only recent silence for next segment
+                                buffer.clear();
+                                trailing_silence_samples = 0;
+                            }
+                        }
+                    }
+                }
+
+                // Check for no-speech timeout
+                if config.no_speech_timeout_ms > 0
+                    && !speech_detected
+                    && recording_started
+                        .map(|t| t.elapsed().as_millis() as u64 >= config.no_speech_timeout_ms)
+                        .unwrap_or(false)
+                {
+                    recording = false;
+                    buffer.clear();
+                    capture = None;
+                    recording_started = None;
+                    output.stdout("No speech detected, cancelled.");
+                    if config.audio_feedback {
+                        feedback::play_stop_sound();
                     }
                 }
             }

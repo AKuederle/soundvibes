@@ -86,6 +86,9 @@ struct Cli {
     #[arg(long, default_value_t = false, global = true)]
     audio_feedback: bool,
 
+    #[arg(long, default_value_t = 5000, global = true)]
+    no_speech_timeout_ms: u64,
+
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set, global = true)]
     download_model: bool,
 
@@ -176,6 +179,7 @@ struct Config {
     list_devices: bool,
     dump_audio: bool,
     audio_feedback: bool,
+    no_speech_timeout_ms: u64,
 }
 
 impl Config {
@@ -305,6 +309,13 @@ impl Config {
                 file.audio_feedback.unwrap_or(cli.audio_feedback)
             };
 
+        let no_speech_timeout_ms =
+            if matches.value_source("no_speech_timeout_ms") == Some(ValueSource::CommandLine) {
+                cli.no_speech_timeout_ms
+            } else {
+                file.no_speech_timeout_ms.unwrap_or(cli.no_speech_timeout_ms)
+            };
+
         let download_model =
             if matches.value_source("download_model") == Some(ValueSource::CommandLine) {
                 cli.download_model
@@ -340,6 +351,7 @@ impl Config {
             list_devices,
             dump_audio,
             audio_feedback,
+            no_speech_timeout_ms,
         }
     }
 }
@@ -368,6 +380,7 @@ struct FileConfig {
     list_devices: Option<bool>,
     dump_audio: Option<bool>,
     audio_feedback: Option<bool>,
+    no_speech_timeout_ms: Option<u64>,
 }
 
 fn main() {
@@ -489,6 +502,7 @@ fn main() {
             dump_audio: config.dump_audio,
             vad_model_path,
             audio_feedback: config.audio_feedback,
+            no_speech_timeout_ms: config.no_speech_timeout_ms,
         };
         let deps = daemon::DaemonDeps::default();
         let mut output = daemon::StdoutOutput;

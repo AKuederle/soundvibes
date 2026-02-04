@@ -1178,6 +1178,7 @@ dependencies = [
  "cpal",
  "hound",
  "libc",
+ "regex",
  "ringbuf",
  "serde",
  "serde_json",

@@ -9,6 +9,11 @@ use crate::error::AppError;
 
 const DEFAULT_MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
+// VAD model constants
+const VAD_MODEL_NAME: &str = "ggml-silero-v6.2.0.bin";
+const VAD_MODEL_URL: &str = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin";
+const VAD_MODEL_SIZE: u64 = 2_000_000; // ~2MB
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelSize {
@@ -186,6 +191,64 @@ fn download_model(path: &Path, spec: &ModelSpec) -> Result<(), AppError> {
     fs::rename(&temp_path, path).map_err(|err| {
         AppError::config(format!(
             "failed to move model file into place {}: {err}",
+            path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+pub fn vad_model_path() -> PathBuf {
+    default_model_dir().join(VAD_MODEL_NAME)
+}
+
+pub fn ensure_vad_model() -> Result<PathBuf, AppError> {
+    let path = vad_model_path();
+
+    if path.exists() {
+        return Ok(path);
+    }
+
+    download_vad_model(&path)?;
+    Ok(path)
+}
+
+fn download_vad_model(path: &Path) -> Result<(), AppError> {
+    println!("Downloading VAD model from {VAD_MODEL_URL}...");
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            AppError::config(format!(
+                "failed to create model directory {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let response = ureq::get(VAD_MODEL_URL)
+        .call()
+        .map_err(|err| AppError::config(format!("failed to download VAD model: {err}")))?;
+    if response.status() != 200 {
+        return Err(AppError::config(format!(
+            "VAD model download failed with status {}",
+            response.status()
+        )));
+    }
+
+    let temp_path = path.with_extension("bin.part");
+    let mut reader = response.into_reader();
+    let mut file = fs::File::create(&temp_path).map_err(|err| {
+        AppError::config(format!(
+            "failed to create temporary VAD model file {}: {err}",
+            temp_path.display()
+        ))
+    })?;
+    io::copy(&mut reader, &mut file)
+        .map_err(|err| AppError::config(format!("failed to write VAD model file: {err}")))?;
+    file.flush()
+        .map_err(|err| AppError::config(format!("failed to flush VAD model file: {err}")))?;
+    fs::rename(&temp_path, path).map_err(|err| {
+        AppError::config(format!(
+            "failed to move VAD model file into place {}: {err}",
             path.display()
         ))
     })?;

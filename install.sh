@@ -429,8 +429,18 @@ install_binary() {
      mkdir -p "$BIN_DIR"
      cp "${TMP_DIR}/sv-linux-x86_64" "$BIN_DIR/sv"
      chmod +x "$BIN_DIR/sv"
-    
+
     print_success "Binary installed to ${BIN_DIR}/sv"
+
+    # Create wrapper script for KDE/desktop shortcuts
+    # KDE shortcuts don't inherit XDG_RUNTIME_DIR, so we need a wrapper
+    cat > "${BIN_DIR}/sv-toggle" << 'WRAPPER'
+#!/bin/bash
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+"$(dirname "$0")/sv"
+WRAPPER
+    chmod +x "${BIN_DIR}/sv-toggle"
+    print_success "Wrapper script installed to ${BIN_DIR}/sv-toggle (for KDE shortcuts)"
 }
 
 # Create configuration
@@ -591,10 +601,14 @@ uninstall() {
         print_success "Systemd service removed"
     fi
     
-    # Remove binary
+    # Remove binary and wrapper
     if [ -f "${BIN_DIR}/sv" ]; then
         rm -f "${BIN_DIR}/sv"
         print_success "Binary removed from ${BIN_DIR}/sv"
+    fi
+    if [ -f "${BIN_DIR}/sv-toggle" ]; then
+        rm -f "${BIN_DIR}/sv-toggle"
+        print_success "Wrapper script removed from ${BIN_DIR}/sv-toggle"
     fi
     
     # Ask about config and data
@@ -641,8 +655,9 @@ print_summary() {
     fi
     
     printf "${BLUE}Window Manager Integration:${NC}\n"
-    printf "  i3/sway: ${YELLOW}bindsym $mod+Shift+v exec sv${NC}\n"
-    printf "  Hyprland: ${YELLOW}bind = SUPER, V, exec, sv${NC}\n\n"
+    printf "  i3/sway:  ${YELLOW}bindsym \$mod+Shift+v exec sv${NC}\n"
+    printf "  Hyprland: ${YELLOW}bind = SUPER, V, exec, sv${NC}\n"
+    printf "  KDE:      ${YELLOW}Use ${BIN_DIR}/sv-toggle for custom shortcuts${NC}\n\n"
     
     printf "${BLUE}Documentation:${NC} https://github.com/kejne/soundvibes\n"
     printf "${BLUE}Issues:${NC} https://github.com/kejne/soundvibes/issues\n\n"

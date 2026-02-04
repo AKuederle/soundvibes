@@ -118,6 +118,14 @@ fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
         return Ok(Some("clipboard paste requires Wayland session".to_string()));
     }
 
+    // Save current clipboard contents
+    let previous_clipboard = Command::new("wl-paste")
+        .arg("--no-newline")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| o.stdout);
+
     // Copy text to clipboard using wl-copy
     let mut child = match Command::new("wl-copy")
         .stdin(Stdio::piped())
@@ -167,8 +175,18 @@ fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
         Err(e) => Ok(Some(format!("failed to run ydotool: {e}"))),
     };
 
-    // Clear clipboard to avoid polluting clipboard history
-    let _ = Command::new("wl-copy").arg("--clear").status();
+    // Restore previous clipboard contents
+    if let Some(prev) = previous_clipboard {
+        if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
+            if let Some(stdin) = child.stdin.as_mut() {
+                let _ = stdin.write_all(&prev);
+            }
+            let _ = child.wait();
+        }
+    } else {
+        // No previous content, clear clipboard
+        let _ = Command::new("wl-copy").arg("--clear").status();
+    }
 
     result
 }

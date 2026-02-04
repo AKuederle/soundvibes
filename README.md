@@ -37,6 +37,31 @@ Bind the toggle command to a hotkey in your desktop environment for hands-free u
 - **Website**: [https://soundvibes.teashaped.dev](https://soundvibes.teashaped.dev) - Full documentation with installation guide, configuration reference, and troubleshooting
 - **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and build instructions
 
+## Output Modes
+
+SoundVibes supports two output modes:
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `inject` (default) | Types text directly into focused window | Dictation into any app |
+| `stdout` | Prints transcript to daemon's terminal | Scripting, debugging |
+
+**Important:** Transcripts appear in the **daemon's output**, not the toggle command's output.
+
+```bash
+# Terminal A: Start daemon (transcripts appear HERE)
+sv daemon start --mode stdout
+
+# Terminal B: Toggle recording
+sv          # start recording
+sv          # stop and transcribe → output appears in Terminal A
+```
+
+**With systemd service:** View transcripts with:
+```bash
+journalctl --user -u sv.service -f
+```
+
 ## Quick Tips
 
 **Desktop Environment Setup:**
@@ -49,12 +74,42 @@ Bind the toggle command to a hotkey in your desktop environment for hands-free u
 systemctl --user enable --now sv.service
 ```
 
+**Text Injection Backends:**
+
+SoundVibes auto-detects the best backend, or you can force one with `--inject-backend`:
+
+| Backend | Works On | Notes |
+|---------|----------|-------|
+| `ydotool` | All (Wayland + X11) | Recommended for KDE Plasma |
+| `wtype` | Wayland (GNOME, Sway) | Doesn't work on KDE Plasma |
+| `xdotool` | X11 only | |
+
+**ydotool Setup (for KDE Plasma or universal use):**
+
+```bash
+# 1. Install ydotool
+sudo pacman -S ydotool              # Arch
+sudo apt install ydotool            # Debian/Ubuntu
+sudo dnf install ydotool            # Fedora
+
+# 2. Set up uinput permissions (required for non-root access)
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/80-uinput.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+
+# 3. Add yourself to input group
+sudo usermod -aG input $USER
+
+# 4. Log out and log back in, then start ydotool
+systemctl --user enable --now ydotool.service
+```
+
 ## Requirements
 
 - Linux x86_64
 - Microphone input device
 - Optional: Vulkan for GPU acceleration
-- Optional: `wtype` (Wayland) or `xdotool` (X11) for text injection
+- Optional: `ydotool` (universal), `wtype` (Wayland), or `xdotool` (X11) for text injection
 
 See the [website](https://soundvibes.teashaped.dev) for detailed requirements and configuration options.
 

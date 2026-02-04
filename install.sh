@@ -237,6 +237,43 @@ install_deps() {
     print_success "System dependencies installed"
 }
 
+# Setup ydotool permissions (uinput access)
+setup_ydotool_permissions() {
+    # Check if ydotool can already access uinput
+    if [ -S "/run/user/$(id -u)/.ydotool_socket" ] || [ -S "/tmp/.ydotool_socket" ]; then
+        print_success "ydotool daemon is already running"
+        return
+    fi
+
+    print_info "Setting up ydotool permissions..."
+
+    # Check if udev rule exists
+    UDEV_RULE="/etc/udev/rules.d/80-uinput.rules"
+    if [ ! -f "$UDEV_RULE" ]; then
+        print_info "Creating udev rule for uinput access..."
+        echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee "$UDEV_RULE" > /dev/null
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger
+        print_success "udev rule created"
+    fi
+
+    # Check if user is in input group
+    if ! groups | grep -q '\binput\b'; then
+        print_info "Adding user to input group..."
+        sudo usermod -aG input "$USER"
+        print_warn "You need to LOG OUT and LOG BACK IN for group changes to take effect"
+        print_info "After logging back in, run: systemctl --user start ydotool.service"
+    else
+        print_success "User is already in input group"
+        # Try to start the service
+        if systemctl --user start ydotool.service 2>/dev/null; then
+            print_success "ydotool daemon started"
+        else
+            print_info "Start ydotool with: systemctl --user enable --now ydotool.service"
+        fi
+    fi
+}
+
 # Install text injection tools
 install_text_injection() {
     print_header "Text Injection Tools"
@@ -244,6 +281,7 @@ install_text_injection() {
     # Check for ydotool first (works on both Wayland and X11, recommended for KDE Plasma)
     if command_exists ydotool; then
         print_success "ydotool is already installed (recommended, works on all desktops)"
+        setup_ydotool_permissions
     else
         print_info "ydotool is recommended for universal text injection (works on KDE Plasma, GNOME, X11)"
         print_info "To install ydotool:"
@@ -261,7 +299,7 @@ install_text_injection() {
                 print_info "  Check your distribution's package manager"
                 ;;
         esac
-        print_info "After installing, enable the daemon: sudo systemctl enable --now ydotool"
+        print_info "After installing, run this script again to set up permissions"
     fi
 
     if [ -n "$WAYLAND_DISPLAY" ]; then

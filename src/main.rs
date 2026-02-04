@@ -413,6 +413,23 @@ fn main() {
         }
     };
 
+    // Prepare VAD model for continuous mode
+    let vad_model_path = if config.vad == VadMode::Continuous && !config.list_devices {
+        println!("Downloading VAD model if needed...");
+        match sv::model::ensure_vad_model() {
+            Ok(path) => {
+                println!("VAD model: {}", path.display());
+                Some(path)
+            }
+            Err(err) => {
+                eprintln!("error: {err}");
+                process::exit(err.exit_code());
+            }
+        }
+    } else {
+        None
+    };
+
     println!("SoundVibes sv {}", env!("CARGO_PKG_VERSION"));
     if let Some(prepared) = &prepared_model {
         if prepared.downloaded {
@@ -457,7 +474,7 @@ fn main() {
             debug_audio: config.debug_audio,
             debug_vad: config.debug_vad,
             dump_audio: config.dump_audio,
-            vad_model_path: None,
+            vad_model_path,
         };
         let deps = daemon::DaemonDeps::default();
         let mut output = daemon::StdoutOutput;

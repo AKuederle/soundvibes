@@ -89,15 +89,24 @@ fn try_ydotool(text: &str) -> Result<Option<String>, OutputError> {
         ));
     }
 
-    // Release any held modifier keys before typing to avoid Ctrl+letter etc.
-    // Key codes: 29=LCtrl, 97=RCtrl, 56=LAlt, 100=RAlt, 42=LShift, 54=RShift, 125=Super
-    let _ = Command::new("ydotool")
-        .args(["key", "29:0", "97:0", "56:0", "100:0", "42:0", "54:0", "125:0"])
-        .status();
+    // Use clipboard paste for instant injection (avoids modifier key conflicts)
+    // Copy text to clipboard
+    let mut child = Command::new("wl-copy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| OutputError::new(format!("failed to run wl-copy: {e}")))?;
 
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let _ = child.wait();
+
+    // Simulate Ctrl+V to paste (keycode 47=V, 29=LCtrl)
+    // 29:1 = Ctrl down, 47:1 = V down, 47:0 = V up, 29:0 = Ctrl up
     match run_command(
         "ydotool",
-        &["type", "-d", "0", "--", text],
+        &["key", "29:1", "47:1", "47:0", "29:0"],
         "install ydotool and run `systemctl --user start ydotool.service`",
     ) {
         Ok(()) => Ok(None),

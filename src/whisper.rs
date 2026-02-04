@@ -13,7 +13,7 @@ use std::thread;
     non_snake_case,
     non_upper_case_globals
 )]
-mod bindings {
+pub mod bindings {
     include!(concat!(env!("OUT_DIR"), "/whisper_bindings.rs"));
 }
 

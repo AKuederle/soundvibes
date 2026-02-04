@@ -62,6 +62,33 @@ sv          # stop and transcribe → output appears in Terminal A
 journalctl --user -u sv.service -f
 ```
 
+### Continuous Mode
+
+Continuous mode transcribes and injects text after each pause in speech, without needing to toggle off:
+
+```bash
+# Start daemon in continuous mode
+sv daemon start --vad continuous
+
+# Toggle on, speak naturally with pauses, text appears after each pause
+sv
+# ... speak sentence 1 ... (pause) → text injected
+# ... speak sentence 2 ... (pause) → text injected
+
+# Toggle off when done
+sv
+```
+
+This mode uses whisper.cpp's Silero VAD model (~2MB, auto-downloaded on first use) to detect speech segments.
+
+**Configuration:**
+- `--vad continuous` - Enable continuous transcription mode
+- `--vad-silence-ms` - Silence duration to trigger transcription (default: 800ms)
+
+**Use cases:**
+- Long-form dictation where you want text as you speak
+- Hands-free note-taking with natural pauses
+
 ## Quick Tips
 
 **Desktop Environment Setup:**

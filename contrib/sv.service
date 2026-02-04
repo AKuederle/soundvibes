@@ -4,7 +4,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/sv daemon start
+ExecStart=%h/.local/bin/sv daemon start --vad continuous
 Restart=on-failure
 RestartSec=5
 

@@ -170,26 +170,29 @@ fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
 
 /// Check if the currently focused window is a terminal emulator
 fn is_focused_window_terminal() -> bool {
-    // Query KWin via DBus for focused window info
-    let output = Command::new("qdbus")
-        .args(["org.kde.KWin", "/KWin", "org.kde.KWin.queryWindowInfo"])
-        .output();
-
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        _ => return false, // Can't detect, assume not terminal
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Look for resourceClass line
-    for line in stdout.lines() {
-        if let Some(class) = line.strip_prefix("resourceClass: ") {
-            let class_lower = class.to_lowercase();
-            return TERMINAL_CLASSES.iter().any(|t| class_lower.contains(t));
+    // Try kdotool (KDE Wayland)
+    if let Ok(output) = Command::new("kdotool")
+        .args(["getactivewindow", "getwindowclassname"])
+        .output()
+    {
+        if output.status.success() {
+            let class = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
+            return TERMINAL_CLASSES.iter().any(|t| class.contains(t));
         }
     }
 
+    // Try xdotool (X11)
+    if let Ok(output) = Command::new("xdotool")
+        .args(["getactivewindow", "getwindowclassname"])
+        .output()
+    {
+        if output.status.success() {
+            let class = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
+            return TERMINAL_CLASSES.iter().any(|t| class.contains(t));
+        }
+    }
+
+    // Can't detect, assume not terminal (use Ctrl+V)
     false
 }
 

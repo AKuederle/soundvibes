@@ -89,6 +89,12 @@ fn try_ydotool(text: &str) -> Result<Option<String>, OutputError> {
         ));
     }
 
+    // Release any held modifier keys before typing to avoid Ctrl+letter etc.
+    // Key codes: 29=LCtrl, 97=RCtrl, 56=LAlt, 100=RAlt, 42=LShift, 54=RShift, 125=Super
+    let _ = Command::new("ydotool")
+        .args(["key", "29:0", "97:0", "56:0", "100:0", "42:0", "54:0", "125:0"])
+        .status();
+
     match run_command(
         "ydotool",
         &["type", "-d", "0", "--", text],

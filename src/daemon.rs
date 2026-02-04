@@ -405,8 +405,6 @@ fn emit_transcript(
     match config.mode {
         OutputMode::Stdout => emit_stdout(config.format, output, text, info),
         OutputMode::Inject => {
-            // Brief delay to let user release modifier keys after toggle
-            std::thread::sleep(std::time::Duration::from_millis(100));
             if let Err(err) = output::inject_text(text, config.inject_backend) {
                 output.stderr(&format!("warn: {err}; falling back to stdout"));
                 emit_stdout(config.format, output, text, info)

@@ -296,7 +296,7 @@ pub fn trim_trailing_silence(samples: &[f32], sample_rate: u32, vad: &VadConfig)
     samples[..end].to_vec()
 }
 
-fn rms_energy(samples: &[f32]) -> f32 {
+pub fn rms_energy(samples: &[f32]) -> f32 {
     let sum_squares = samples.iter().map(|sample| sample * sample).sum::<f32>();
     (sum_squares / samples.len() as f32).sqrt()
 }

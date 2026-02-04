@@ -17,7 +17,6 @@ use crate::error::AppError;
 use crate::model::{self, ModelLanguage, ModelSize, ModelSpec};
 use crate::output;
 use crate::types::{AudioHost, InjectBackend, OutputFormat, OutputMode, VadMode};
-use crate::vad::VadContext;
 use crate::whisper::WhisperContext;
 
 #[derive(Debug, Clone)]
@@ -176,16 +175,6 @@ pub fn run_daemon_loop(
         .transcriber_factory
         .load(config.model_path.as_deref())?;
 
-    // Initialize VAD context for continuous mode
-    let vad_ctx = if config.vad == VadMode::Continuous {
-        let vad_path = config.vad_model_path.as_ref()
-            .ok_or_else(|| AppError::config("VAD model path required for continuous mode"))?;
-        Some(VadContext::from_file(vad_path)
-            .map_err(|e| AppError::runtime(e.to_string()))?)
-    } else {
-        None
-    };
-
     let vad = audio::VadConfig::new(
         config.vad == VadMode::On || config.vad == VadMode::Continuous,
         config.vad_silence_ms,
@@ -198,6 +187,9 @@ pub fn run_daemon_loop(
     let mut buffer = Vec::new();
     let mut utterance_index = 0u64;
     let mut capture: Option<Box<dyn CaptureSource>> = None;
+    // For continuous mode: track silence at end of buffer
+    let mut trailing_silence_samples: usize = 0;
+    let silence_threshold_samples = (config.vad_silence_ms as f32 / 1000.0 * config.sample_rate as f32) as usize;
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -240,6 +232,7 @@ pub fn run_daemon_loop(
                         })?;
                     recording = true;
                     buffer.clear();
+                    trailing_silence_samples = 0;
                     capture = Some(new_capture);
                     output.stdout("Toggle on. Recording...");
                 }
@@ -292,48 +285,49 @@ pub fn run_daemon_loop(
 
         if recording {
             if let Some(active) = capture.as_mut() {
+                let prev_len = buffer.len();
                 active.drain(&mut buffer);
+                let new_samples = buffer.len() - prev_len;
 
-                // In continuous mode, check for completed speech segments
-                if let Some(ref vad) = vad_ctx {
-                    let segments = vad.detect_segments(&buffer, config.vad_silence_ms as u32);
+                // In continuous mode, detect silence at end of buffer using energy-based VAD
+                if config.vad == VadMode::Continuous && new_samples > 0 {
+                    // Check energy of new samples
+                    let new_audio = &buffer[prev_len..];
+                    let rms = audio::rms_energy(new_audio);
 
-                    // If we have more than one segment, the first one is complete
-                    // (the last segment may still be in progress)
-                    if segments.len() > 1 {
-                        let (start, end) = segments[0];
-                        let start_sample = (start * config.sample_rate as f32) as usize;
-                        let end_sample = (end * config.sample_rate as f32) as usize;
+                    if rms < config.vad_threshold {
+                        // Silence detected, accumulate
+                        trailing_silence_samples += new_samples;
+                    } else {
+                        // Speech detected, reset silence counter
+                        trailing_silence_samples = 0;
+                    }
 
-                        // Extract and transcribe the completed segment
-                        if end_sample > start_sample && end_sample <= buffer.len() {
-                            let segment_samples: Vec<f32> = buffer[start_sample..end_sample].to_vec();
-                            let duration_ms = audio::samples_to_ms(segment_samples.len(), config.sample_rate);
+                    // If we have enough silence and some speech before it, transcribe
+                    if trailing_silence_samples >= silence_threshold_samples {
+                        let speech_end = buffer.len() - trailing_silence_samples;
+                        if speech_end > 0 {
+                            let speech_samples = &buffer[..speech_end];
+                            let duration_ms = audio::samples_to_ms(speech_samples.len(), config.sample_rate);
 
-                            if !segment_samples.is_empty() {
-                                utterance_index += 1;
-                                match transcriber.transcribe(&segment_samples, Some(&config.language)) {
-                                    Ok(transcript) => {
-                                        if !transcript.is_empty() {
-                                            let _ = emit_transcript(config, output, &transcript, audio::SegmentInfo {
-                                                index: utterance_index,
-                                                duration_ms,
-                                            });
-                                        }
+                            utterance_index += 1;
+                            match transcriber.transcribe(speech_samples, Some(&config.language)) {
+                                Ok(transcript) => {
+                                    if !transcript.trim().is_empty() {
+                                        let _ = emit_transcript(config, output, &transcript, audio::SegmentInfo {
+                                            index: utterance_index,
+                                            duration_ms,
+                                        });
                                     }
-                                    Err(err) => {
-                                        output.stderr(&format!("Transcription error: {err}"));
-                                    }
+                                }
+                                Err(err) => {
+                                    output.stderr(&format!("Transcription error: {err}"));
                                 }
                             }
 
-                            // Remove processed audio from buffer, keeping from next segment onward
-                            let keep_from = if segments.len() > 1 {
-                                (segments[1].0 * config.sample_rate as f32) as usize
-                            } else {
-                                end_sample
-                            };
-                            buffer.drain(..keep_from.min(buffer.len()));
+                            // Clear buffer, keep only recent silence for next segment
+                            buffer.clear();
+                            trailing_silence_samples = 0;
                         }
                     }
                 }

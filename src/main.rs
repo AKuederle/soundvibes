@@ -574,14 +574,16 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
     let mut capture = audio::start_capture(&host, config.device.as_deref(), config.sample_rate)
         .map_err(|err| AppError::audio(err.message))?;
 
-    let mut detector = audio::SpeechDetector::new(config.vad_threshold, 100, config.sample_rate);
+    let confirm_samples = (0.1 * config.sample_rate as f32) as usize; // 100ms
 
     println!("Testing audio levels. Threshold: {:.4}", config.vad_threshold);
     println!("Speak to see if speech is detected. Press Ctrl+C to stop.\n");
-    println!("{:>10} {:>10} {:>12} {:>8}", "RMS", "Threshold", "Accumulated", "Detected");
+    println!("{:>10} {:>10} {:>12} {:>8}", "RMS", "Threshold", "Accumulated", "Status");
     println!("{:-<10} {:-<10} {:-<12} {:-<8}", "", "", "", "");
 
     let mut buffer = Vec::new();
+    let mut speech_samples: usize = 0;
+
     loop {
         audio::drain_samples(&mut capture, &mut buffer);
         if buffer.is_empty() {
@@ -589,15 +591,30 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
             continue;
         }
 
-        let analysis = detector.analyze(&buffer);
-        detector.process(&buffer);
+        let rms = audio::rms_energy(&buffer);
+        let above_threshold = rms >= config.vad_threshold;
+
+        if above_threshold {
+            speech_samples += buffer.len();
+        } else {
+            speech_samples = 0;
+        }
+
+        let detected = speech_samples >= confirm_samples;
+        let status = if detected {
+            "DETECTED"
+        } else if above_threshold {
+            "above"
+        } else {
+            "silent"
+        };
 
         print!(
             "\r{:>10.6} {:>10.4} {:>12} {:>8}",
-            analysis.rms,
-            analysis.threshold,
-            format!("{}/{}", detector.speech_samples(), analysis.confirm_samples_needed),
-            if detector.is_detected() { "YES" } else { "no" }
+            rms,
+            config.vad_threshold,
+            format!("{}/{}", speech_samples, confirm_samples),
+            status
         );
         std::io::stdout().flush().ok();
 

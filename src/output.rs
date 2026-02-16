@@ -111,11 +111,38 @@ fn inject_text_auto(text: &str) -> Result<(), OutputError> {
     )))
 }
 
+/// Run wl-copy with data piped to stdin, properly closing stdin before waiting.
+fn run_wl_copy(data: &[u8]) -> Result<(), String> {
+    let mut child = Command::new("wl-copy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "wl-copy not found; install wl-clipboard".to_string()
+            } else {
+                format!("failed to run wl-copy: {e}")
+            }
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(data);
+        // stdin is dropped here, sending EOF to wl-copy
+    }
+    let _ = child.wait();
+    Ok(())
+}
+
 /// Try clipboard paste: copy to clipboard, then simulate Ctrl+V or Ctrl+Shift+V
 fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
-    // Check if we have the required tools
+    // Check required tools before touching the clipboard
     if !has_wayland_session() {
         return Ok(Some("clipboard paste requires Wayland session".to_string()));
+    }
+
+    if !has_ydotool() {
+        return Ok(Some(
+            "clipboard paste requires ydotool for key simulation".to_string()
+        ));
     }
 
     // Save current clipboard contents
@@ -127,33 +154,12 @@ fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
         .map(|o| o.stdout);
 
     // Copy text to clipboard using wl-copy
-    let mut child = match Command::new("wl-copy")
-        .stdin(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Some("wl-copy not found; install wl-clipboard".to_string()));
-        }
-        Err(e) => {
-            return Ok(Some(format!("failed to run wl-copy: {e}")));
-        }
-    };
-
-    if let Some(stdin) = child.stdin.as_mut() {
-        let _ = stdin.write_all(text.as_bytes());
+    if let Err(msg) = run_wl_copy(text.as_bytes()) {
+        return Ok(Some(msg));
     }
-    let _ = child.wait();
 
     // Detect if focused window is a terminal
     let is_terminal = is_focused_window_terminal();
-
-    // Check if ydotool is available for key simulation
-    if !has_ydotool() {
-        return Ok(Some(
-            "clipboard paste requires ydotool for key simulation".to_string()
-        ));
-    }
 
     // Simulate paste: Ctrl+V for normal apps, Ctrl+Shift+V for terminals
     // Key codes: 29=LCtrl, 42=LShift, 47=V
@@ -175,14 +181,12 @@ fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
         Err(e) => Ok(Some(format!("failed to run ydotool: {e}"))),
     };
 
+    // Give the target application time to read the clipboard before restoring
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
     // Restore previous clipboard contents
-    if let Some(prev) = previous_clipboard {
-        if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(&prev);
-            }
-            let _ = child.wait();
-        }
+    if let Some(prev) = &previous_clipboard {
+        let _ = run_wl_copy(prev);
     } else {
         // No previous content, clear clipboard
         let _ = Command::new("wl-copy").arg("--clear").status();

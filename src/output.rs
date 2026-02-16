@@ -1,8 +1,8 @@
 use std::env;
 use std::fmt;
-use std::io::Write;
+use std::io::Read as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use crate::types::InjectBackend;
 
@@ -111,34 +111,75 @@ fn inject_text_auto(text: &str) -> Result<(), OutputError> {
     )))
 }
 
-/// Run wl-copy with data piped to stdin, properly closing stdin before waiting.
-fn run_wl_copy(data: &[u8]) -> Result<(), String> {
-    let mut child = Command::new("wl-copy")
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "wl-copy not found; install wl-clipboard".to_string()
-            } else {
-                format!("failed to run wl-copy: {e}")
-            }
-        })?;
+/// Copy text to clipboard with Klipper-hidden hint using wl-clipboard-rs.
+/// Offers both text/plain and x-kde-passwordManagerHint MIME types so Klipper
+/// skips recording this entry in its history.
+fn clipboard_copy_secret(text: &str) -> Result<(), String> {
+    use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(data);
-        // stdin is dropped here, sending EOF to wl-copy
-    }
-    let _ = child.wait();
-    Ok(())
+    let sources = vec![
+        MimeSource {
+            source: Source::Bytes(text.as_bytes().into()),
+            mime_type: MimeType::Text,
+        },
+        MimeSource {
+            source: Source::Bytes(b"secret"[..].into()),
+            mime_type: MimeType::Specific("x-kde-passwordManagerHint".to_string()),
+        },
+    ];
+
+    Options::new()
+        .copy_multi(sources)
+        .map_err(|e| format!("clipboard copy failed: {e}"))
+}
+
+/// Save current clipboard contents (returns None if clipboard is empty).
+fn clipboard_save() -> Option<Vec<u8>> {
+    use wl_clipboard_rs::paste;
+
+    let (mut reader, _mime) = paste::get_contents(
+        paste::ClipboardType::Regular,
+        paste::Seat::Unspecified,
+        paste::MimeType::Any,
+    )
+    .ok()?;
+
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// Restore previously saved clipboard contents (with secret hint so Klipper
+/// doesn't record the restore as a new history entry).
+fn clipboard_restore(data: &[u8]) -> Result<(), String> {
+    use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
+
+    let sources = vec![
+        MimeSource {
+            source: Source::Bytes(data.into()),
+            mime_type: MimeType::Text,
+        },
+        MimeSource {
+            source: Source::Bytes(b"secret"[..].into()),
+            mime_type: MimeType::Specific("x-kde-passwordManagerHint".to_string()),
+        },
+    ];
+
+    Options::new()
+        .copy_multi(sources)
+        .map_err(|e| format!("clipboard restore failed: {e}"))
+}
+
+/// Clear the clipboard.
+fn clipboard_clear() -> Result<(), String> {
+    use wl_clipboard_rs::copy::{self, ClipboardType, Seat};
+
+    copy::clear(ClipboardType::Regular, Seat::All)
+        .map_err(|e| format!("clipboard clear failed: {e}"))
 }
 
 /// Try clipboard paste: copy to clipboard, then simulate Ctrl+V or Ctrl+Shift+V
 fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
-    // Check required tools before touching the clipboard
-    if !has_wayland_session() {
-        return Ok(Some("clipboard paste requires Wayland session".to_string()));
-    }
-
     if !has_ydotool() {
         return Ok(Some(
             "clipboard paste requires ydotool for key simulation".to_string()
@@ -146,15 +187,10 @@ fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
     }
 
     // Save current clipboard contents
-    let previous_clipboard = Command::new("wl-paste")
-        .arg("--no-newline")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| o.stdout);
+    let previous_clipboard = clipboard_save();
 
-    // Copy text to clipboard using wl-copy
-    if let Err(msg) = run_wl_copy(text.as_bytes()) {
+    // Copy text to clipboard with Klipper-hidden hint
+    if let Err(msg) = clipboard_copy_secret(text) {
         return Ok(Some(msg));
     }
 
@@ -184,12 +220,11 @@ fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
     // Give the target application time to read the clipboard before restoring
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    // Restore previous clipboard contents
+    // Restore previous clipboard contents or clear
     if let Some(prev) = &previous_clipboard {
-        let _ = run_wl_copy(prev);
+        let _ = clipboard_restore(prev);
     } else {
-        // No previous content, clear clipboard
-        let _ = Command::new("wl-copy").arg("--clear").status();
+        let _ = clipboard_clear();
     }
 
     result

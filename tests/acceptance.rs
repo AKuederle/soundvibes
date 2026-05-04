@@ -30,7 +30,7 @@ use sv::daemon::test_support::{
     control_channel, TestAudioBackend, TestOutput, TestTranscriberFactory,
 };
 #[cfg(feature = "test-support")]
-use sv::daemon::{DaemonConfig, DaemonDeps};
+use sv::daemon::{DaemonConfig, DaemonDeps, DaemonOutput};
 #[cfg(feature = "test-support")]
 use sv::hotkey::HotkeyConfig;
 #[cfg(feature = "test-support")]
@@ -322,8 +322,12 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
 fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(), Box<dyn Error>> {
     let (sender, receiver) = control_channel();
     let control_sender = sender.clone();
+    let (transcript_sender, transcript_receiver) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
-    let mut output = TestOutput::default();
+    let mut output = TranscriptSignalOutput {
+        lines: Vec::new(),
+        transcript_sender,
+    };
     let deps = DaemonDeps {
         audio: Box::new(TestAudioBackend::new(
             vec!["Mic".to_string()],
@@ -357,9 +361,16 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
     };
 
     let shutdown_trigger = Arc::clone(&shutdown);
+    let transcript_before_release = Arc::new(AtomicBool::new(false));
+    let transcript_before_release_trigger = Arc::clone(&transcript_before_release);
     let control_thread = thread::spawn(move || {
         let _ = control_sender.send(sv::daemon::ControlEvent::StartRecording);
-        thread::sleep(Duration::from_millis(120));
+        if transcript_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok()
+        {
+            transcript_before_release_trigger.store(true, Ordering::Relaxed);
+        }
         let _ = control_sender.send(sv::daemon::ControlEvent::StopRecording);
         thread::sleep(Duration::from_millis(50));
         shutdown_trigger.store(true, Ordering::Relaxed);
@@ -372,7 +383,36 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
         .stdout_lines()
         .iter()
         .any(|line| line.contains("Transcript 1: pause transcript")));
+    assert!(
+        transcript_before_release.load(Ordering::Relaxed),
+        "expected continuous mode to transcribe before key release"
+    );
     Ok(())
+}
+
+#[cfg(feature = "test-support")]
+struct TranscriptSignalOutput {
+    lines: Vec<String>,
+    transcript_sender: mpsc::Sender<()>,
+}
+
+#[cfg(feature = "test-support")]
+impl TranscriptSignalOutput {
+    fn stdout_lines(&self) -> &[String] {
+        &self.lines
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl DaemonOutput for TranscriptSignalOutput {
+    fn stdout(&mut self, message: &str) {
+        if message.contains("Transcript 1: pause transcript") {
+            let _ = self.transcript_sender.send(());
+        }
+        self.lines.push(message.to_string());
+    }
+
+    fn stderr(&mut self, _message: &str) {}
 }
 
 #[test]

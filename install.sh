@@ -538,6 +538,10 @@ uninstall() {
         rm -f "${BIN_DIR}/sv"
         print_success "Binary removed from ${BIN_DIR}/sv"
     fi
+    if [ -f "${BIN_DIR}/sv-toggle" ]; then
+        rm -f "${BIN_DIR}/sv-toggle"
+        print_success "Legacy wrapper removed from ${BIN_DIR}/sv-toggle"
+    fi
     # Ask about config and data
     if [ "$AUTO_YES" = false ]; then
         printf "Remove configuration and downloaded models? [y/N] "

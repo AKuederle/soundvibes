@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
@@ -146,11 +147,6 @@ pub fn parse_key_name(name: &str) -> Result<Key, AppError> {
     if let Some(key) = parse_prefixed_keycode(trimmed)? {
         return Ok(key);
     }
-    if trimmed.parse::<u16>().is_ok() || trimmed.starts_with("0x") || trimmed.starts_with("0X") {
-        return Err(AppError::config(format!(
-            "bare numeric hotkey keycodes are ambiguous: {name}; use EVTEST_<code> or WEV_<code>"
-        )));
-    }
 
     let normalized = trimmed
         .chars()
@@ -164,53 +160,38 @@ pub fn parse_key_name(name: &str) -> Result<Key, AppError> {
         .unwrap_or(&normalized)
         .to_string();
 
-    common_key_names()
-        .get(key_name.as_str())
-        .copied()
-        .ok_or_else(|| {
+    if key_name.len() == 1 && key_name.chars().all(|c| c.is_ascii_digit()) {
+        return Key::from_str(&format!("KEY_{key_name}"))
+            .map_err(|_| AppError::config(format!("invalid hotkey key '{name}'")));
+    }
+
+    if trimmed.parse::<u16>().is_ok() || trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+        return Err(AppError::config(format!(
+            "bare numeric hotkey keycodes are ambiguous: {name}; use EVTEST_<code> or WEV_<code>"
+        )));
+    }
+
+    if let Some(alias) = common_key_aliases().get(key_name.as_str()).copied() {
+        return Ok(alias);
+    }
+    Key::from_str(&normalized)
+        .or_else(|_| Key::from_str(&format!("KEY_{key_name}")))
+        .map_err(|_| {
             AppError::config(format!(
                 "unknown hotkey key '{name}'; use evtest to find a KEY_* name"
             ))
         })
 }
 
-fn common_key_names() -> HashMap<&'static str, Key> {
+fn common_key_aliases() -> HashMap<&'static str, Key> {
     [
-        ("SCROLLLOCK", Key::KEY_SCROLLLOCK),
-        ("PAUSE", Key::KEY_PAUSE),
-        ("CAPSLOCK", Key::KEY_CAPSLOCK),
-        ("INSERT", Key::KEY_INSERT),
-        ("LEFTCTRL", Key::KEY_LEFTCTRL),
         ("LEFT_CTRL", Key::KEY_LEFTCTRL),
         ("LCTRL", Key::KEY_LEFTCTRL),
-        ("RIGHTCTRL", Key::KEY_RIGHTCTRL),
         ("RIGHT_CTRL", Key::KEY_RIGHTCTRL),
         ("RCTRL", Key::KEY_RIGHTCTRL),
-        ("LEFTALT", Key::KEY_LEFTALT),
         ("LALT", Key::KEY_LEFTALT),
-        ("RIGHTALT", Key::KEY_RIGHTALT),
         ("RALT", Key::KEY_RIGHTALT),
-        ("LEFTSHIFT", Key::KEY_LEFTSHIFT),
-        ("RIGHTSHIFT", Key::KEY_RIGHTSHIFT),
-        ("LEFTMETA", Key::KEY_LEFTMETA),
-        ("RIGHTMETA", Key::KEY_RIGHTMETA),
-        ("F13", Key::KEY_F13),
-        ("F14", Key::KEY_F14),
-        ("F15", Key::KEY_F15),
-        ("F16", Key::KEY_F16),
-        ("F17", Key::KEY_F17),
-        ("F18", Key::KEY_F18),
-        ("F19", Key::KEY_F19),
-        ("F20", Key::KEY_F20),
-        ("F21", Key::KEY_F21),
-        ("F22", Key::KEY_F22),
-        ("F23", Key::KEY_F23),
-        ("F24", Key::KEY_F24),
-        ("MEDIA", Key::KEY_MEDIA),
-        ("RECORD", Key::KEY_RECORD),
         ("ESC", Key::KEY_ESC),
-        ("ESCAPE", Key::KEY_ESC),
-        ("SPACE", Key::KEY_SPACE),
     ]
     .into_iter()
     .collect()
@@ -257,6 +238,14 @@ mod tests {
         assert_eq!(parse_key_name("RIGHTCTRL").unwrap(), Key::KEY_RIGHTCTRL);
         assert_eq!(parse_key_name("right-ctrl").unwrap(), Key::KEY_RIGHTCTRL);
         assert_eq!(parse_key_name("KEY_RIGHTCTRL").unwrap(), Key::KEY_RIGHTCTRL);
+    }
+
+    #[test]
+    fn parses_evtest_key_names() {
+        assert_eq!(parse_key_name("F12").unwrap(), Key::KEY_F12);
+        assert_eq!(parse_key_name("KEY_MENU").unwrap(), Key::KEY_MENU);
+        assert_eq!(parse_key_name("A").unwrap(), Key::KEY_A);
+        assert_eq!(parse_key_name("1").unwrap(), Key::KEY_1);
     }
 
     #[test]

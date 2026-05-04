@@ -101,7 +101,7 @@ These tests validate the product behavior for the offline Linux CLI.
 - Pass: the acceptance test exits 0.
 
 ### AT-11: Paste mode restores clipboard
-- Setup: Wayland session with `wl-copy`, `wl-paste`, and `wtype` available.
+- Setup: Wayland session with `wl-copy`, `wl-paste`, `dotool`, and `/dev/uinput` access available.
 - Command: start daemon with `[output] mode = "paste"` and `restore_clipboard = true`.
 - Action: put known content with a known MIME type in the clipboard, dictate text, and let SoundVibes paste it.
 - Expect: dictated text is pasted through the configured paste shortcut, and the previous clipboard content is restored with its original MIME type.

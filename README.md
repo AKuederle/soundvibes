@@ -45,9 +45,9 @@ SoundVibes supports explicit output modes:
 
 | Mode | Description | Use Case |
 |------|-------------|----------|
-| `paste` (default) | Copies text with `wl-copy`, pastes with `wtype`, then restores the previous clipboard | KDE/Wayland dictation |
+| `paste` (default) | Copies text with `wl-copy`, pastes with `dotool`, then restores the previous clipboard | KDE/Wayland dictation |
 | `clipboard` | Copies transcript to the clipboard for manual paste | Manual workflows |
-| `type` | Types text directly with `wtype` | Wayland compositors that support virtual keyboard |
+| `type` | Types text directly with `dotool` | Direct input through uinput |
 | `stdout` | Prints transcript to daemon's terminal | Scripting, debugging |
 
 **Important:** Transcripts appear in the **daemon's output**.
@@ -119,7 +119,7 @@ sv daemon start --mode paste --paste-keys ctrl+shift+v
 - Microphone input device
 - Optional: Vulkan for GPU acceleration
 - `wl-clipboard` (`wl-copy` and `wl-paste`) for paste/clipboard modes
-- `wtype` for automatic paste key simulation and direct type mode
+- `dotool` plus `/dev/uinput` access for automatic paste key simulation and direct type mode
 
 See the [website](https://soundvibes.teashaped.dev) for detailed requirements and configuration options.
 

@@ -589,7 +589,7 @@ fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn
     let mut runner = AcceptanceRunner::default();
     runner.push_output(0, b"text/html\ntext/plain\n");
     runner.push_output(0, b"<b>old</b>");
-    runner.push_output(0, b"");
+    runner.push_status(0);
     runner.push_status(0);
 
     sv::output::output_text_with_runner(
@@ -615,9 +615,9 @@ fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn
     );
     assert_command(
         &runner.commands[3],
-        "wtype",
-        &["-M", "ctrl", "-k", "v", "-m", "ctrl"],
-        b"",
+        "dotool",
+        &[],
+        b"keydown leftctrl\nkey v\nkeyup leftctrl\n",
     );
     assert_command(
         &runner.commands[4],

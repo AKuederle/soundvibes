@@ -264,31 +264,29 @@ install_text_injection() {
             esac
         fi
 
-        if command_exists wtype; then
-            print_success "wtype is already installed"
+        if command_exists dotool; then
+            print_success "dotool is already installed"
         else
-            print_info "Installing wtype for automatic paste key simulation..."
+            print_info "Installing dotool for automatic paste key simulation..."
 
             case "$DISTRO" in
                 ubuntu|debian)
-                    # wtype is in Debian 12+ and Ubuntu 23.04+
-                    sudo apt-get install -y wtype || {
-                        print_warn "wtype not available in official repositories"
-                        print_info "You may need to build from source: https://github.com/atx/wtype"
+                    sudo apt-get install -y dotool || {
+                        print_warn "dotool not available in official repositories"
+                        print_info "Install dotool manually and ensure your user can access /dev/uinput"
                     }
                     ;;
                 arch|manjaro)
-                    sudo pacman -S --needed --noconfirm wtype
+                    sudo pacman -S --needed --noconfirm dotool
                     ;;
                 fedora)
-                    sudo dnf install -y wtype || {
-                        print_warn "wtype may not be available in official repositories"
-                        print_info "You may need to build from source: https://github.com/atx/wtype"
+                    sudo dnf install -y dotool || {
+                        print_warn "dotool may not be available in official repositories"
+                        print_info "Install dotool manually and ensure your user can access /dev/uinput"
                     }
                     ;;
                 *)
-                    print_warn "Please install wtype manually for Wayland support"
-                    print_info "https://github.com/atx/wtype"
+                    print_warn "Please install dotool manually for automatic paste support"
                     ;;
             esac
         fi
@@ -296,17 +294,17 @@ install_text_injection() {
         # Note about KDE Plasma
         if [ "$XDG_CURRENT_DESKTOP" = "KDE" ]; then
             print_info "KDE Plasma detected: paste mode suppresses Klipper history for temporary transcription copies."
-            print_info "If wtype is blocked by your compositor, use mode = \"clipboard\" and paste manually."
+            print_info "dotool uses /dev/uinput, so your user must have uinput access."
         fi
 
     elif [ -n "$DISPLAY" ]; then
         print_info "X11 display server detected"
-        print_warn "Automatic paste mode is Wayland-focused and requires wl-clipboard plus wtype."
+        print_warn "Automatic paste mode is Wayland-focused and requires wl-clipboard plus dotool."
         print_info "Use mode = \"stdout\" or mode = \"clipboard\" on X11 until native X11 paste support is added."
 
     else
         print_warn "Could not detect display server (neither Wayland nor X11)"
-        print_info "Install wl-clipboard and wtype for automatic Wayland paste mode."
+        print_info "Install wl-clipboard and dotool for automatic Wayland paste mode."
     fi
 }
 

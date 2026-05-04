@@ -299,12 +299,23 @@ fn copy_plain_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), Out
 }
 
 fn type_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputError> {
-    let wtype_args = vec!["--".to_string(), text.to_string()];
-    if command_succeeds("wtype", &wtype_args, runner)? {
-        return Ok(());
+    let script = format!("type {text}\n");
+    let status = runner
+        .status_with_stdin("dotool", &[], script.as_bytes())
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                OutputError::new("dotool not found; install dotool")
+            } else {
+                OutputError::new(format!("failed to run dotool: {err}"))
+            }
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(OutputError::new(format!(
+            "dotool typing exited with status {status}"
+        )))
     }
-
-    Err(OutputError::new("wtype typing failed"))
 }
 
 fn send_paste_key(
@@ -312,31 +323,30 @@ fn send_paste_key(
     runner: &mut dyn CommandRunner,
 ) -> Result<(), OutputError> {
     let key = ParsedPasteKey::parse(&config.paste_keys)?;
-    send_paste_key_wtype(&key, runner)
+    send_paste_key_dotool(&key, runner)
 }
 
-fn send_paste_key_wtype(
+fn send_paste_key_dotool(
     key: &ParsedPasteKey,
     runner: &mut dyn CommandRunner,
 ) -> Result<(), OutputError> {
-    let args = key.to_wtype_args();
-    if command_succeeds("wtype", &args, runner)? {
-        Ok(())
-    } else {
-        Err(OutputError::new("wtype paste key failed"))
+    let script = key.to_dotool_script();
+    let status = runner
+        .status_with_stdin("dotool", &[], script.as_bytes())
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                OutputError::new("dotool not found; install dotool")
+            } else {
+                OutputError::new(format!("failed to run dotool: {err}"))
+            }
+        })?;
+    if status.success() {
+        return Ok(());
     }
-}
 
-fn command_succeeds(
-    program: &str,
-    args: &[String],
-    runner: &mut dyn CommandRunner,
-) -> Result<bool, OutputError> {
-    match runner.output(program, args) {
-        Ok(output) => Ok(output.status.success()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(OutputError::new(format!("failed to run {program}: {err}"))),
-    }
+    Err(OutputError::new(format!(
+        "dotool paste key exited with status {status}"
+    )))
 }
 
 impl ParsedPasteKey {
@@ -355,19 +365,17 @@ impl ParsedPasteKey {
         Ok(Self { modifiers, key })
     }
 
-    fn to_wtype_args(&self) -> Vec<String> {
-        let mut args = Vec::new();
+    fn to_dotool_script(&self) -> String {
+        let mut lines = Vec::new();
         for modifier in &self.modifiers {
-            args.push("-M".to_string());
-            args.push(modifier.wtype_name().to_string());
+            lines.push(format!("keydown {}", modifier.dotool_name()));
         }
-        args.push("-k".to_string());
-        args.push(self.key.wtype_name().to_string());
+        lines.push(format!("key {}", self.key.dotool_name()));
         for modifier in self.modifiers.iter().rev() {
-            args.push("-m".to_string());
-            args.push(modifier.wtype_name().to_string());
+            lines.push(format!("keyup {}", modifier.dotool_name()));
         }
-        args
+        lines.push(String::new());
+        lines.join("\n")
     }
 }
 
@@ -395,15 +403,15 @@ impl KeyName {
         }
     }
 
-    fn wtype_name(self) -> &'static str {
+    fn dotool_name(self) -> &'static str {
         match self {
-            Self::Ctrl => "ctrl",
-            Self::Shift => "shift",
-            Self::Alt => "alt",
-            Self::Super => "super",
+            Self::Ctrl => "leftctrl",
+            Self::Shift => "leftshift",
+            Self::Alt => "leftalt",
+            Self::Super => "leftmeta",
             Self::V => "v",
-            Self::Insert => "Insert",
-            Self::Enter => "Return",
+            Self::Insert => "insert",
+            Self::Enter => "enter",
         }
     }
 }
@@ -557,8 +565,9 @@ mod tests {
         let mut runner = FakeRunner::default();
         runner.push_output(b"text/plain\n");
         runner.push_output(b"old");
-        runner.push_status_success();
-        runner.push_failed_output(b"wtype unsupported");
+        runner
+            .statuses
+            .push(std::process::ExitStatus::from_raw(1 << 8));
         runner.push_status_success();
 
         let err = output_text_with_runner(
@@ -569,7 +578,7 @@ mod tests {
         )
         .expect_err("paste key failure should be reported");
 
-        assert!(err.to_string().contains("wtype paste key failed"));
+        assert!(err.to_string().contains("dotool paste key exited"));
         let restore = runner.commands.last().expect("restore command");
         assert_eq!(restore.program, "wl-copy");
         assert_eq!(restore.args, ["--type", "text/plain"]);
@@ -603,10 +612,11 @@ mod tests {
         assert_eq!(runner.commands[2].program, "temporary-clipboard-copy");
         assert_eq!(runner.commands[2].args, ["text/plain", KDE_SECRET_MIME]);
         assert_eq!(runner.commands[2].stdin, b"new text");
-        assert_eq!(runner.commands[3].program, "wtype");
+        assert_eq!(runner.commands[3].program, "dotool");
+        assert!(runner.commands[3].args.is_empty());
         assert_eq!(
-            runner.commands[3].args,
-            ["-M", "ctrl", "-k", "v", "-m", "ctrl"]
+            String::from_utf8_lossy(&runner.commands[3].stdin),
+            "keydown leftctrl\nkey v\nkeyup leftctrl\n"
         );
         assert_eq!(runner.commands[4].program, "wl-copy");
         assert_eq!(runner.commands[4].args, ["--type", "text/html"]);
@@ -614,6 +624,28 @@ mod tests {
         assert_eq!(
             runner.sleeps,
             [Duration::from_millis(100), Duration::from_millis(250)]
+        );
+    }
+
+    #[test]
+    fn type_mode_uses_dotool_without_wtype_fallback() {
+        let mut runner = FakeRunner::default();
+        runner.push_status_success();
+
+        output_text_with_runner(
+            "typed text",
+            OutputMode::Type,
+            &OutputConfig::default(),
+            &mut runner,
+        )
+        .expect("type output should succeed");
+
+        assert_eq!(runner.commands.len(), 1);
+        assert_eq!(runner.commands[0].program, "dotool");
+        assert!(runner.commands[0].args.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&runner.commands[0].stdin),
+            "type typed text\n"
         );
     }
 }

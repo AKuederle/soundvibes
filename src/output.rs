@@ -222,7 +222,11 @@ fn read_clipboard_snapshot(
         return Ok(None);
     }
 
-    let read_args = vec!["--type".to_string(), mime_type.clone()];
+    let read_args = vec![
+        "--type".to_string(),
+        mime_type.clone(),
+        "--no-newline".to_string(),
+    ];
     let content = runner
         .output("wl-paste", &read_args)
         .map_err(|err| OutputError::new(format!("failed to read clipboard: {err}")))?;
@@ -592,7 +596,10 @@ mod tests {
 
         assert_eq!(runner.commands[0].program, "wl-paste");
         assert_eq!(runner.commands[0].args, ["--list-types"]);
-        assert_eq!(runner.commands[1].args, ["--type", "text/html"]);
+        assert_eq!(
+            runner.commands[1].args,
+            ["--type", "text/html", "--no-newline"]
+        );
         assert_eq!(runner.commands[2].program, "temporary-clipboard-copy");
         assert_eq!(runner.commands[2].args, ["text/plain", KDE_SECRET_MIME]);
         assert_eq!(runner.commands[2].stdin, b"new text");

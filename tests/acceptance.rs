@@ -502,7 +502,7 @@ fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn
     assert_command(
         &runner.commands[1],
         "wl-paste",
-        &["--type", "text/html"],
+        &["--type", "text/html", "--no-newline"],
         b"",
     );
     assert_command(

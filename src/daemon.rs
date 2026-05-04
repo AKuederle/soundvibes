@@ -466,8 +466,6 @@ fn emit_transcript(
     text: &str,
     info: audio::SegmentInfo,
 ) -> Result<(), String> {
-    append_transcript_to_file(text)?;
-
     match config.mode {
         OutputMode::Stdout => emit_stdout(config.format, output, text, info),
         mode => {
@@ -491,36 +489,6 @@ pub fn transcript_file_path() -> PathBuf {
         .join("soundvibes")
         .join("transcripts")
         .join(format!("{date}.log"))
-}
-
-fn append_transcript_to_file(text: &str) -> Result<(), String> {
-    if text.trim().is_empty() {
-        return Ok(());
-    }
-
-    let path = transcript_file_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| {
-            format!(
-                "failed to create transcript directory {}: {err}",
-                parent.display()
-            )
-        })?;
-    }
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|err| format!("failed to open transcript file {}: {err}", path.display()))?;
-
-    let date = Local::now().format("%Y-%m-%d").to_string();
-    for line in text.lines() {
-        writeln!(file, "{date} {line}")
-            .map_err(|err| format!("failed to write transcript file {}: {err}", path.display()))?;
-    }
-
-    Ok(())
 }
 
 fn emit_stdout(
@@ -1009,12 +977,8 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::fs;
-    use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::Duration;
 
@@ -1022,53 +986,8 @@ mod tests {
         control_channel, TestAudioBackend, TestOutput, TestTranscriberFactory,
     };
 
-    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &Path) -> Self {
-            let previous = env::var_os(key);
-            env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => env::set_var(self.key, value),
-                None => env::remove_var(self.key),
-            }
-        }
-    }
-
-    fn temp_data_dir() -> std::path::PathBuf {
-        let mut dir = env::temp_dir();
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        dir.push(format!(
-            "soundvibes-daemon-test-{}-{stamp}",
-            std::process::id()
-        ));
-        dir
-    }
-
-    fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
-        TEST_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("test lock poisoned")
-    }
-
     #[test]
     fn daemon_loop_emits_transcript_to_output() -> Result<(), AppError> {
-        let _lock = lock_tests();
         let (sender, receiver) = control_channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -1135,63 +1054,5 @@ mod tests {
         let err =
             parse_set_model_command("set-model size=small").expect_err("expected parse error");
         assert!(err.contains("model-language"));
-    }
-
-    #[test]
-    fn emit_transcript_appends_dated_lines_to_transcript_file() {
-        let _lock = lock_tests();
-        let data_dir = temp_data_dir();
-        fs::create_dir_all(&data_dir).expect("failed to create temp data dir");
-        let _guard = EnvGuard::set("XDG_DATA_HOME", &data_dir);
-
-        let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
-            sample_rate: 16_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
-            vad: VadMode::Off,
-            vad_silence_ms: 800,
-            vad_threshold: 0.015,
-            vad_chunk_ms: 250,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            vad_model_path: None,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-        };
-        let mut output = TestOutput::default();
-
-        emit_transcript(
-            &config,
-            &mut output,
-            "hello\nworld",
-            audio::SegmentInfo {
-                index: 1,
-                duration_ms: 100,
-            },
-        )
-        .expect("emit should succeed");
-
-        let transcript_path = transcript_file_path();
-        let contents = fs::read_to_string(&transcript_path).expect("transcript file should exist");
-        let date = Local::now().format("%Y-%m-%d").to_string();
-        let lines: Vec<&str> = contents.lines().collect();
-
-        assert_eq!(
-            transcript_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .expect("transcript file name"),
-            format!("{date}.log")
-        );
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], format!("{date} hello"));
-        assert_eq!(lines[1], format!("{date} world"));
     }
 }

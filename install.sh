@@ -407,8 +407,10 @@ sample_rate = 16000         # Hz
 
 # Output settings
 format = "plain"            # Options: plain, jsonl
-mode = "stdout"             # Options: stdout, inject
 language = "en"             # Transcription language
+
+[output]
+mode = "stdout"             # Options: paste, clipboard, type, stdout
 
 # VAD (Voice Activity Detection) settings
 vad = "on"                  # Options: on, off

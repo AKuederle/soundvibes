@@ -401,7 +401,11 @@ impl std::fmt::Display for SpeechAnalysis {
             "RMS: {:.6} (threshold: {:.6}, {}), samples: {}, accumulated: {}/{}, detected: {}",
             self.rms,
             self.threshold,
-            if self.above_threshold { "ABOVE" } else { "below" },
+            if self.above_threshold {
+                "ABOVE"
+            } else {
+                "below"
+            },
             self.samples_len,
             self.accumulated_speech_samples,
             self.confirm_samples_needed,

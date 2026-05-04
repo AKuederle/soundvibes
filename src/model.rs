@@ -11,7 +11,8 @@ const DEFAULT_MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.c
 
 // VAD model constants
 const VAD_MODEL_NAME: &str = "ggml-silero-v6.2.0.bin";
-const VAD_MODEL_URL: &str = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin";
+const VAD_MODEL_URL: &str =
+    "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin";
 const VAD_MODEL_SIZE: u64 = 2_000_000; // ~2MB
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, Deserialize)]

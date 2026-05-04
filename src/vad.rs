@@ -41,11 +41,7 @@ impl VadContext {
 
     /// Detect speech segments in audio samples.
     /// Returns Vec of (start_sec, end_sec) tuples.
-    pub fn detect_segments(
-        &self,
-        samples: &[f32],
-        min_silence_ms: u32,
-    ) -> Vec<(f32, f32)> {
+    pub fn detect_segments(&self, samples: &[f32], min_silence_ms: u32) -> Vec<(f32, f32)> {
         let mut params = unsafe { whisper_vad_default_params() };
         params.min_silence_duration_ms = min_silence_ms as i32;
 

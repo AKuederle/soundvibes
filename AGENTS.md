@@ -8,18 +8,6 @@ This repository is a Rust CLI app for offline speech-to-text on Linux. Use these
 
 - Follow these instructions plus any user-provided requirements.
 
-## Issue Tracking (bd/beads)
-
-This project uses **bd (beads)** for issue tracking. Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for auto-injection.
-
-Quick reference:
-- `bd ready` - Find unblocked work
-- `bd show <id>` - View issue details
-- `bd update <id> --status in_progress` - Claim work
-- `bd create "Title" --type task --priority 2` - Create issue
-- `bd close <id>` - Complete work
-- `bd sync` - Sync with git (run at session end)
-
 ## Agent Workflow
 
 - Apply TDD by default: write/extend tests before or alongside feature changes.
@@ -120,19 +108,17 @@ Tests:
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
 
 MANDATORY WORKFLOW:
-1. File issues for remaining work (bd).
+1. Note any remaining work in the handoff.
 2. Run quality gates if code changed (tests, lint, build).
-3. Update issue status (close finished, update in-progress).
-4. PUSH TO REMOTE:
+3. PUSH TO REMOTE:
    ```bash
    git pull --rebase
-   bd sync
    git push
    git status  # MUST show "up to date with origin"
    ```
-5. Clean up (clear stashes, prune remote branches).
-6. Verify all changes committed and pushed.
-7. Hand off context for the next session.
+4. Clean up (clear stashes, prune remote branches).
+5. Verify all changes committed and pushed.
+6. Hand off context for the next session.
 
 CRITICAL RULES:
 - Work is NOT complete until `git push` succeeds.

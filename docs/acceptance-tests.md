@@ -49,23 +49,30 @@ These tests validate the product behavior for the offline Linux CLI.
 - Expect: error message indicating device not found.
 - Pass: exit code is `3`.
 
-### AT-04: Daemon toggle capture
+### AT-04: Daemon hold-to-record capture
 - Setup: set `model` in config to `${XDG_DATA_HOME:-~/.local/share}/soundvibes/models/ggml-base.en.bin`.
-- Command: `sv daemon start` in one terminal, `sv` to toggle on, then `sv` to toggle off.
-- Action: speak a short sentence while capture is toggled on.
-- Expect: final transcript is printed after toggling off.
-- Pass: final output appears shortly after toggle off.
+- Command: `sv daemon start` with `[hotkey] enabled = true` and a configured key such as `RIGHTCTRL`.
+- Action: hold the configured key, speak a short sentence, then release the key.
+- Expect: final transcript is printed after key release.
+- Pass: final output appears shortly after release.
 
 ### AT-05: JSONL output format
 - Setup: set `format` in config to `"jsonl"`.
-- Command: `sv daemon start` in one terminal, `sv` to toggle on, then `sv` to toggle off.
-- Action: speak a short sentence while capture is toggled on.
+- Command: `sv daemon start` with a configured hold key.
+- Action: hold the configured key, speak a short sentence, then release.
 - Expect: output lines are valid JSON with `type`, `text`, `timestamp`.
 - Pass: JSONL lines parse and include required fields.
 
+### AT-05a: Continuous hold-to-record pause transcription
+- Setup: set `vad = "continuous"` and configure `[hotkey] key = "RIGHTCTRL"`.
+- Command: `sv daemon start`.
+- Action: hold the configured key, speak one sentence, pause without releasing, then speak another sentence.
+- Expect: the first sentence is transcribed after the pause while the key is still held.
+- Pass: output appears after the pause and recording continues until key release.
+
 ### AT-06: Offline operation
 - Setup: set `model` in config to `${XDG_DATA_HOME:-~/.local/share}/soundvibes/models/ggml-base.en.bin`.
-- Command: disconnect network, run `sv daemon start`, then `sv` to toggle on/off.
+- Command: disconnect network, run `sv daemon start`, then hold/release the configured key.
 - Expect: no network access required.
 - Pass: transcription works without network connectivity.
 

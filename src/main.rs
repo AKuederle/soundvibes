@@ -8,6 +8,7 @@ use std::process;
 use sv::audio;
 use sv::daemon;
 use sv::error::AppError;
+use sv::hotkey::HotkeyConfig;
 use sv::model::{model_language_for_transcription, ModelLanguage, ModelSize, ModelSpec};
 use sv::output::{OutputConfig, OutputMode};
 use sv::types::{AudioHost, OutputFormat, VadMode, VadSetting};
@@ -100,6 +101,12 @@ struct Cli {
     no_speech_timeout_ms: u64,
 
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set, global = true)]
+    hotkey_enabled: bool,
+
+    #[arg(long, value_name = "KEY", global = true)]
+    hotkey_key: Option<String>,
+
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, global = true)]
     download_model: bool,
 
     #[command(subcommand)]
@@ -133,7 +140,6 @@ enum DaemonCommand {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum CliMode {
-    Toggle,
     RunDaemon,
     StopDaemon,
     ShowTranscriptPath,
@@ -171,7 +177,7 @@ fn resolve_cli_mode(cli: &Cli) -> CliMode {
             if cli.list_devices {
                 CliMode::ListDevices
             } else {
-                CliMode::Toggle
+                CliMode::RunDaemon
             }
         }
     }
@@ -200,6 +206,7 @@ struct Config {
     dump_audio: bool,
     audio_feedback: bool,
     no_speech_timeout_ms: u64,
+    hotkey: HotkeyConfig,
 }
 
 impl Config {
@@ -365,6 +372,20 @@ impl Config {
                     .unwrap_or(cli.no_speech_timeout_ms)
             };
 
+        let hotkey_file = file.hotkey.unwrap_or_default();
+        let hotkey = HotkeyConfig {
+            enabled: if matches.value_source("hotkey_enabled") == Some(ValueSource::CommandLine) {
+                cli.hotkey_enabled
+            } else {
+                hotkey_file.enabled
+            },
+            key: if matches.value_source("hotkey_key") == Some(ValueSource::CommandLine) {
+                cli.hotkey_key
+            } else {
+                hotkey_file.key
+            },
+        };
+
         let download_model =
             if matches.value_source("download_model") == Some(ValueSource::CommandLine) {
                 cli.download_model
@@ -401,6 +422,7 @@ impl Config {
             dump_audio,
             audio_feedback,
             no_speech_timeout_ms,
+            hotkey,
         }
     }
 }
@@ -429,6 +451,7 @@ struct FileConfig {
     dump_audio: Option<bool>,
     audio_feedback: Option<bool>,
     no_speech_timeout_ms: Option<u64>,
+    hotkey: Option<HotkeyConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -446,13 +469,6 @@ fn main() {
     let cli = Cli::from_arg_matches(&matches).expect("Failed to parse CLI arguments");
     let mode = resolve_cli_mode(&cli);
     match mode {
-        CliMode::Toggle => {
-            if let Err(err) = daemon::send_toggle_command() {
-                eprintln!("error: {err}");
-                process::exit(err.exit_code());
-            }
-            return;
-        }
         CliMode::StopDaemon => {
             if let Err(err) = daemon::send_stop_command() {
                 eprintln!("error: {err}");
@@ -567,6 +583,7 @@ fn main() {
             vad_model_path,
             audio_feedback: config.audio_feedback,
             no_speech_timeout_ms: config.no_speech_timeout_ms,
+            hotkey: config.hotkey.clone(),
         };
         let deps = daemon::DaemonDeps::default();
         let mut output = daemon::StdoutOutput;
@@ -733,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn toggle_command_reaches_daemon_socket() -> Result<(), AppError> {
+    fn record_start_command_reaches_daemon_socket() -> Result<(), AppError> {
         let _lock = lock_tests();
         let runtime_dir = temp_runtime_dir();
         fs::create_dir_all(&runtime_dir).map_err(|err| {
@@ -741,34 +758,37 @@ mod tests {
         })?;
         let _guard = EnvGuard::set("XDG_RUNTIME_DIR", &runtime_dir);
         let socket_path = daemon::daemon_socket_path()?;
-        let (_socket_guard, control_events) = daemon::start_socket_listener(&socket_path)?;
+        let (_socket_guard, control_events, _sender) = daemon::start_socket_listener(&socket_path)?;
 
-        daemon::send_toggle_command()?;
+        daemon::send_record_start_command()?;
 
         match control_events.recv_timeout(Duration::from_secs(1)) {
-            Ok(daemon::ControlEvent::Toggle) => Ok(()),
+            Ok(daemon::ControlEvent::StartRecording) => Ok(()),
+            Ok(daemon::ControlEvent::StopRecording) => {
+                Err(AppError::runtime("unexpected record-stop event"))
+            }
             Ok(daemon::ControlEvent::Stop) => Err(AppError::runtime("unexpected stop event")),
             Ok(daemon::ControlEvent::SetModel { .. }) => {
                 Err(AppError::runtime("unexpected set-model event"))
             }
             Ok(daemon::ControlEvent::Error(message)) => Err(AppError::runtime(message)),
-            Err(_) => Err(AppError::runtime("toggle command not received")),
+            Err(_) => Err(AppError::runtime("record-start command not received")),
         }
     }
 
     #[test]
-    fn toggle_command_errors_when_socket_missing() {
+    fn record_start_command_errors_when_socket_missing() {
         let _lock = lock_tests();
         let runtime_dir = temp_runtime_dir();
         fs::create_dir_all(&runtime_dir).expect("failed to create test runtime dir");
         let _guard = EnvGuard::set("XDG_RUNTIME_DIR", &runtime_dir);
 
-        let err = daemon::send_toggle_command().expect_err("expected socket error");
+        let err = daemon::send_record_start_command().expect_err("expected socket error");
         assert!(err.to_string().contains("daemon socket not found"));
     }
 
     #[test]
-    fn toggle_command_errors_when_socket_unavailable() {
+    fn record_start_command_errors_when_socket_unavailable() {
         let _lock = lock_tests();
         let runtime_dir = temp_runtime_dir();
         fs::create_dir_all(&runtime_dir).expect("failed to create test runtime dir");
@@ -779,15 +799,15 @@ mod tests {
         }
         fs::write(&socket_path, b"not-a-socket").expect("failed to create socket file");
 
-        let err = daemon::send_toggle_command().expect_err("expected socket error");
+        let err = daemon::send_record_start_command().expect_err("expected socket error");
         assert!(err.to_string().contains("daemon socket unavailable"));
         assert!(err.to_string().contains("sv daemon start"));
     }
 
     #[test]
-    fn defaults_to_toggle_when_no_subcommand() {
+    fn defaults_to_daemon_when_no_subcommand() {
         let cli = Cli::try_parse_from(["sv"]).expect("failed to parse cli");
-        assert_eq!(resolve_cli_mode(&cli), CliMode::Toggle);
+        assert_eq!(resolve_cli_mode(&cli), CliMode::RunDaemon);
     }
 
     #[test]
@@ -843,6 +863,29 @@ mod tests {
         assert_eq!(config.output.paste_keys, "ctrl+v");
         assert_eq!(config.output.pre_paste_delay_ms, 100);
         assert_eq!(config.output.restore_clipboard_delay_ms, 250);
+        assert!(config.hotkey.enabled);
+        assert_eq!(config.hotkey.key, None);
+    }
+
+    #[test]
+    fn reads_hotkey_config_from_hotkey_table() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [hotkey]
+            enabled = true
+            key = "RIGHTCTRL"
+            "#,
+        )
+        .expect("config should parse");
+        let command = Cli::command();
+        let matches = command
+            .try_get_matches_from(["sv", "daemon", "start"])
+            .expect("failed to parse cli");
+        let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
+        let config = Config::from_sources(cli, &matches, file);
+
+        assert!(config.hotkey.enabled);
+        assert_eq!(config.hotkey.key.as_deref(), Some("RIGHTCTRL"));
     }
 
     #[test]

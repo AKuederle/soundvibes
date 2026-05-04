@@ -32,6 +32,8 @@ use sv::daemon::test_support::{
 #[cfg(feature = "test-support")]
 use sv::daemon::{DaemonConfig, DaemonDeps};
 #[cfg(feature = "test-support")]
+use sv::hotkey::HotkeyConfig;
+#[cfg(feature = "test-support")]
 use sv::output::{OutputConfig, OutputMode};
 #[cfg(feature = "test-support")]
 use sv::types::{AudioHost, OutputFormat, VadMode};
@@ -200,7 +202,7 @@ fn at03_invalid_input_device_returns_exit_code_3() -> Result<(), Box<dyn Error>>
 
 #[cfg(feature = "test-support")]
 #[test]
-fn at04_daemon_toggle_captures_and_transcribes() -> Result<(), Box<dyn Error>> {
+fn at04_daemon_hold_key_captures_and_transcribes() -> Result<(), Box<dyn Error>> {
     let (sender, receiver) = control_channel();
     let control_sender = sender.clone();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -232,12 +234,13 @@ fn at04_daemon_toggle_captures_and_transcribes() -> Result<(), Box<dyn Error>> {
         vad_model_path: None,
         audio_feedback: false,
         no_speech_timeout_ms: 0,
+        hotkey: HotkeyConfig::default(),
     };
 
     let shutdown_trigger = Arc::clone(&shutdown);
     let control_thread = thread::spawn(move || {
-        let _ = control_sender.send(sv::daemon::ControlEvent::Toggle);
-        let _ = control_sender.send(sv::daemon::ControlEvent::Toggle);
+        let _ = control_sender.send(sv::daemon::ControlEvent::StartRecording);
+        let _ = control_sender.send(sv::daemon::ControlEvent::StopRecording);
         thread::sleep(Duration::from_millis(50));
         shutdown_trigger.store(true, Ordering::Relaxed);
     });
@@ -286,12 +289,13 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
         vad_model_path: None,
         audio_feedback: false,
         no_speech_timeout_ms: 0,
+        hotkey: HotkeyConfig::default(),
     };
 
     let shutdown_trigger = Arc::clone(&shutdown);
     let control_thread = thread::spawn(move || {
-        let _ = control_sender.send(sv::daemon::ControlEvent::Toggle);
-        let _ = control_sender.send(sv::daemon::ControlEvent::Toggle);
+        let _ = control_sender.send(sv::daemon::ControlEvent::StartRecording);
+        let _ = control_sender.send(sv::daemon::ControlEvent::StopRecording);
         thread::sleep(Duration::from_millis(50));
         shutdown_trigger.store(true, Ordering::Relaxed);
     });
@@ -310,6 +314,64 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
     assert!(parsed["timestamp"].as_str().is_some());
     assert!(parsed["utterance"].as_u64().is_some());
     assert!(parsed["duration_ms"].as_u64().is_some());
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(), Box<dyn Error>> {
+    let (sender, receiver) = control_channel();
+    let control_sender = sender.clone();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut output = TestOutput::default();
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::new(
+            vec!["Mic".to_string()],
+            vec![vec![0.2; 160], vec![0.0; 400]],
+        )),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
+            "pause transcript".to_string()
+        ])),
+    };
+    let config = DaemonConfig {
+        model_path: None,
+        download_model: false,
+        language: "en".to_string(),
+        device: None,
+        audio_host: AudioHost::Default,
+        sample_rate: 16_000,
+        format: OutputFormat::Plain,
+        mode: OutputMode::Stdout,
+        output: OutputConfig::default(),
+        vad: VadMode::Continuous,
+        vad_silence_ms: 20,
+        vad_threshold: 0.015,
+        vad_chunk_ms: 10,
+        debug_audio: false,
+        debug_vad: false,
+        dump_audio: false,
+        vad_model_path: None,
+        audio_feedback: false,
+        no_speech_timeout_ms: 0,
+        hotkey: HotkeyConfig::default(),
+    };
+
+    let shutdown_trigger = Arc::clone(&shutdown);
+    let control_thread = thread::spawn(move || {
+        let _ = control_sender.send(sv::daemon::ControlEvent::StartRecording);
+        thread::sleep(Duration::from_millis(120));
+        let _ = control_sender.send(sv::daemon::ControlEvent::StopRecording);
+        thread::sleep(Duration::from_millis(50));
+        shutdown_trigger.store(true, Ordering::Relaxed);
+    });
+
+    sv::daemon::run_daemon_loop(&config, &deps, &mut output, receiver, shutdown.as_ref())?;
+    control_thread.join().expect("control thread failed");
+
+    assert!(output
+        .stdout_lines()
+        .iter()
+        .any(|line| line.contains("Transcript 1: pause transcript")));
     Ok(())
 }
 

@@ -6,7 +6,7 @@
 
 ## Overview
 
-SoundVibes (sv) is an offline speech-to-text tool for Linux. It captures audio from your microphone using start/stop toggles and transcribes locally using whisper.cpp. No cloud, no latency, no subscriptions.
+SoundVibes (sv) is an offline speech-to-text tool for Linux. It captures audio from your microphone while you hold a configured evdev key and transcribes locally using whisper.cpp. No cloud, no latency, no subscriptions.
 
 ## Quick Start
 
@@ -24,13 +24,15 @@ Or download manually from [GitHub Releases](https://github.com/kejne/soundvibes/
 sv daemon start
 ```
 
-### 3. Toggle Recording
+### 3. Hold The Recording Key
 
-```bash
-sv
+Configure a Linux evdev key in `~/.config/soundvibes/config.toml`, then hold it while speaking and release it to finish the current recording.
+
+```toml
+[hotkey]
+enabled = true
+key = "RIGHTCTRL"
 ```
-
-Bind the toggle command to a hotkey in your desktop environment for hands-free use.
 
 ## Documentation
 
@@ -48,15 +50,14 @@ SoundVibes supports explicit output modes:
 | `type` | Types text directly with `wtype` | Wayland compositors that support virtual keyboard |
 | `stdout` | Prints transcript to daemon's terminal | Scripting, debugging |
 
-**Important:** Transcripts appear in the **daemon's output**, not the toggle command's output.
+**Important:** Transcripts appear in the **daemon's output**.
 
 ```bash
 # Terminal A: Start daemon (transcripts appear HERE)
 sv daemon start --mode stdout
 
-# Terminal B: Toggle recording
-sv          # start recording
-sv          # stop and transcribe → output appears in Terminal A
+# Hold the configured hotkey to record.
+# Release it to stop and transcribe.
 ```
 
 **With systemd service:** View transcripts with:
@@ -66,19 +67,17 @@ journalctl --user -u sv.service -f
 
 ### Continuous Mode
 
-Continuous mode transcribes and injects text after each pause in speech, without needing to toggle off:
+Continuous mode transcribes and injects text after each pause in speech, even while the recording key is still held:
 
 ```bash
 # Start daemon in continuous mode
 sv daemon start --vad continuous
 
-# Toggle on, speak naturally with pauses, text appears after each pause
-sv
+# Hold the configured hotkey and speak naturally.
 # ... speak sentence 1 ... (pause) → text injected
 # ... speak sentence 2 ... (pause) → text injected
 
-# Toggle off when done
-sv
+# Release the key when done.
 ```
 
 This mode uses whisper.cpp's Silero VAD model (~2MB, auto-downloaded on first use) to detect speech segments.
@@ -93,10 +92,10 @@ This mode uses whisper.cpp's Silero VAD model (~2MB, auto-downloaded on first us
 
 ## Quick Tips
 
-**Desktop Environment Setup:**
-- **i3/Sway**: `bindsym $mod+Shift+v exec sv`
-- **Hyprland**: `bind = SUPER, V, exec, sv`
-- **GNOME/KDE**: Add custom keyboard shortcut with command `sv`
+**Hotkey Setup:**
+- SoundVibes reads `/dev/input/event*` via evdev, like VoxType.
+- Your user must be able to read keyboard event devices, usually by being in the `input` group.
+- Use `evtest` to find key names; configure the part after `KEY_`, for example `RIGHTCTRL`.
 
 **Systemd Service:**
 ```bash

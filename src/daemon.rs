@@ -15,6 +15,7 @@ use std::time::Duration;
 use crate::audio;
 use crate::error::AppError;
 use crate::feedback;
+use crate::hotkey::{self, HotkeyConfig};
 use crate::model::{self, ModelLanguage, ModelSize, ModelSpec};
 use crate::output::{self, OutputConfig, OutputMode};
 use crate::types::{AudioHost, OutputFormat, VadMode};
@@ -41,6 +42,7 @@ pub struct DaemonConfig {
     pub vad_model_path: Option<PathBuf>,
     pub audio_feedback: bool,
     pub no_speech_timeout_ms: u64,
+    pub hotkey: HotkeyConfig,
 }
 
 pub trait DaemonOutput {
@@ -122,7 +124,8 @@ pub fn select_audio_host(audio_host: AudioHost) -> Result<cpal::Host, AppError> 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlEvent {
-    Toggle,
+    StartRecording,
+    StopRecording,
     Stop,
     SetModel {
         size: ModelSize,
@@ -137,8 +140,14 @@ pub fn run_daemon(
     output: &mut dyn DaemonOutput,
 ) -> Result<(), AppError> {
     let socket_path = daemon_socket_path()?;
-    let (_guard, control_events) = start_socket_listener(&socket_path)?;
+    let (_guard, control_events, control_sender) = start_socket_listener(&socket_path)?;
     output.stdout(&format!("Daemon listening on {}", socket_path.display()));
+
+    let _hotkey_listener = if config.hotkey.enabled {
+        Some(hotkey::start_listener(&config.hotkey, control_sender)?)
+    } else {
+        None
+    };
 
     let shutdown = Arc::new(AtomicBool::new(false));
     for signal in [SIGINT, SIGTERM] {
@@ -220,13 +229,30 @@ pub fn run_daemon_loop(
             break;
         }
         match control_events.recv_timeout(Duration::from_millis(20)) {
-            Ok(ControlEvent::Toggle) => {
+            Ok(ControlEvent::StartRecording) => {
+                if !recording {
+                    start_active_recording(
+                        deps,
+                        &host,
+                        config,
+                        &mut recording,
+                        &mut capture,
+                        &mut buffer,
+                        &mut trailing_silence_samples,
+                        &mut recording_started,
+                        &mut speech_detected,
+                        &mut speech_samples,
+                        output,
+                    )?;
+                }
+            }
+            Ok(ControlEvent::StopRecording) => {
                 if recording {
-                    recording = false;
-                    stop_recording(
+                    stop_active_recording(
                         &*transcriber,
                         config,
                         &vad,
+                        &mut recording,
                         &mut capture,
                         &mut buffer,
                         &mut utterance_index,
@@ -234,27 +260,6 @@ pub fn run_daemon_loop(
                     )?;
                     if config.audio_feedback {
                         feedback::play_stop_sound();
-                    }
-                } else {
-                    let new_capture = deps
-                        .audio
-                        .start_capture(&host, config.device.as_deref(), config.sample_rate)
-                        .map_err(|err| match err.kind {
-                            audio::AudioErrorKind::DeviceNotFound if config.device.is_some() => {
-                                AppError::audio(err.message)
-                            }
-                            _ => AppError::audio(err.message),
-                        })?;
-                    recording = true;
-                    buffer.clear();
-                    trailing_silence_samples = 0;
-                    recording_started = Some(std::time::Instant::now());
-                    speech_detected = false;
-                    speech_samples = 0;
-                    capture = Some(new_capture);
-                    output.stdout("Toggle on. Recording...");
-                    if config.audio_feedback {
-                        feedback::play_start_sound();
                     }
                 }
             }
@@ -426,6 +431,64 @@ fn stop_recording(
     Ok(())
 }
 
+fn start_active_recording(
+    deps: &DaemonDeps,
+    host: &cpal::Host,
+    config: &DaemonConfig,
+    recording: &mut bool,
+    capture: &mut Option<Box<dyn CaptureSource>>,
+    buffer: &mut Vec<f32>,
+    trailing_silence_samples: &mut usize,
+    recording_started: &mut Option<std::time::Instant>,
+    speech_detected: &mut bool,
+    speech_samples: &mut usize,
+    output: &mut dyn DaemonOutput,
+) -> Result<(), AppError> {
+    let new_capture = deps
+        .audio
+        .start_capture(host, config.device.as_deref(), config.sample_rate)
+        .map_err(|err| match err.kind {
+            audio::AudioErrorKind::DeviceNotFound if config.device.is_some() => {
+                AppError::audio(err.message)
+            }
+            _ => AppError::audio(err.message),
+        })?;
+    *recording = true;
+    buffer.clear();
+    *trailing_silence_samples = 0;
+    *recording_started = Some(std::time::Instant::now());
+    *speech_detected = false;
+    *speech_samples = 0;
+    *capture = Some(new_capture);
+    output.stdout("Recording started.");
+    if config.audio_feedback {
+        feedback::play_start_sound();
+    }
+    Ok(())
+}
+
+fn stop_active_recording(
+    transcriber: &dyn Transcriber,
+    config: &DaemonConfig,
+    vad: &audio::VadConfig,
+    recording: &mut bool,
+    capture: &mut Option<Box<dyn CaptureSource>>,
+    buffer: &mut Vec<f32>,
+    utterance_index: &mut u64,
+    output: &mut dyn DaemonOutput,
+) -> Result<(), AppError> {
+    *recording = false;
+    stop_recording(
+        transcriber,
+        config,
+        vad,
+        capture,
+        buffer,
+        utterance_index,
+        output,
+    )
+}
+
 fn finalize_recording(
     transcriber: &dyn Transcriber,
     config: &DaemonConfig,
@@ -577,7 +640,14 @@ pub fn daemon_socket_path() -> Result<PathBuf, AppError> {
 
 pub fn start_socket_listener(
     socket_path: &Path,
-) -> Result<(SocketGuard, Receiver<ControlEvent>), AppError> {
+) -> Result<
+    (
+        SocketGuard,
+        Receiver<ControlEvent>,
+        mpsc::Sender<ControlEvent>,
+    ),
+    AppError,
+> {
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
             AppError::runtime(format!(
@@ -590,7 +660,7 @@ pub fn start_socket_listener(
     if socket_path.exists() {
         if UnixStream::connect(socket_path).is_ok() {
             return Err(AppError::runtime(
-                "daemon already running; use `sv` to toggle capture",
+                "daemon already running; hold the configured hotkey to record",
             ));
         }
         fs::remove_file(socket_path).map_err(|err| {
@@ -611,6 +681,7 @@ pub fn start_socket_listener(
         path: socket_path.to_path_buf(),
     };
     let (sender, receiver) = mpsc::channel();
+    let socket_sender = sender.clone();
 
     thread::spawn(move || {
         for stream in listener.incoming() {
@@ -622,14 +693,16 @@ pub fn start_socket_listener(
                         continue;
                     }
                     let command = buffer.trim();
-                    if command.is_empty() || command == "toggle" {
-                        let _ = sender.send(ControlEvent::Toggle);
+                    if command == "record-start" {
+                        let _ = socket_sender.send(ControlEvent::StartRecording);
+                    } else if command == "record-stop" {
+                        let _ = socket_sender.send(ControlEvent::StopRecording);
                     } else if command == "stop" {
-                        let _ = sender.send(ControlEvent::Stop);
+                        let _ = socket_sender.send(ControlEvent::Stop);
                     } else if command.starts_with("set-model") {
                         match parse_set_model_command(command) {
                             Ok((size, model_language)) => {
-                                let _ = sender.send(ControlEvent::SetModel {
+                                let _ = socket_sender.send(ControlEvent::SetModel {
                                     size,
                                     model_language,
                                 });
@@ -643,15 +716,15 @@ pub fn start_socket_listener(
                     }
                 }
                 Err(err) => {
-                    let _ =
-                        sender.send(ControlEvent::Error(format!("socket listener error: {err}")));
+                    let _ = socket_sender
+                        .send(ControlEvent::Error(format!("socket listener error: {err}")));
                     break;
                 }
             }
         }
     });
 
-    Ok((guard, receiver))
+    Ok((guard, receiver, sender))
 }
 
 fn parse_set_model_command(command: &str) -> Result<(ModelSize, ModelLanguage), String> {
@@ -696,8 +769,12 @@ fn parse_model_language(value: &str) -> Option<ModelLanguage> {
     }
 }
 
-pub fn send_toggle_command() -> Result<(), AppError> {
-    send_daemon_command("toggle")
+pub fn send_record_start_command() -> Result<(), AppError> {
+    send_daemon_command("record-start")
+}
+
+pub fn send_record_stop_command() -> Result<(), AppError> {
+    send_daemon_command("record-stop")
 }
 
 pub fn send_stop_command() -> Result<(), AppError> {
@@ -1019,12 +1096,13 @@ mod tests {
             vad_model_path: None,
             audio_feedback: false,
             no_speech_timeout_ms: 0,
+            hotkey: HotkeyConfig::default(),
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
         let control_thread = thread::spawn(move || {
-            let _ = control_sender.send(ControlEvent::Toggle);
-            let _ = control_sender.send(ControlEvent::Toggle);
+            let _ = control_sender.send(ControlEvent::StartRecording);
+            let _ = control_sender.send(ControlEvent::StopRecording);
             thread::sleep(Duration::from_millis(50));
             shutdown_trigger.store(true, Ordering::Relaxed);
         });
@@ -1037,6 +1115,65 @@ mod tests {
             .stdout_lines()
             .iter()
             .any(|line| line.contains("Transcript 1: hello")));
+        Ok(())
+    }
+
+    #[test]
+    fn hold_recording_continuous_mode_transcribes_on_pause_before_release() -> Result<(), AppError>
+    {
+        let (sender, receiver) = control_channel();
+        let control_sender = sender.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut output = TestOutput::default();
+        let deps = DaemonDeps {
+            audio: Box::new(TestAudioBackend::new(
+                vec!["Mic".to_string()],
+                vec![vec![0.2; 160], vec![0.0; 400]],
+            )),
+            transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
+                "pause transcript".to_string()
+            ])),
+        };
+        let config = DaemonConfig {
+            model_path: None,
+            download_model: false,
+            language: "en".to_string(),
+            device: None,
+            audio_host: AudioHost::Default,
+            sample_rate: 16_000,
+            format: OutputFormat::Plain,
+            mode: OutputMode::Stdout,
+            output: OutputConfig::default(),
+            vad: VadMode::Continuous,
+            vad_silence_ms: 20,
+            vad_threshold: 0.015,
+            vad_chunk_ms: 20,
+            debug_audio: false,
+            debug_vad: false,
+            dump_audio: false,
+            vad_model_path: None,
+            audio_feedback: false,
+            no_speech_timeout_ms: 0,
+            hotkey: HotkeyConfig::default(),
+        };
+
+        let shutdown_trigger = Arc::clone(&shutdown);
+        let control_thread = thread::spawn(move || {
+            let _ = control_sender.send(ControlEvent::StartRecording);
+            thread::sleep(Duration::from_millis(120));
+            let _ = control_sender.send(ControlEvent::StopRecording);
+            thread::sleep(Duration::from_millis(20));
+            shutdown_trigger.store(true, Ordering::Relaxed);
+        });
+
+        let result = run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown);
+        control_thread.join().expect("control thread failed");
+        result?;
+
+        assert!(output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("Transcript 1: pause transcript")));
         Ok(())
     }
 

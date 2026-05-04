@@ -12,8 +12,8 @@ This document describes the technical design for the `sv` CLI that performs offl
 
 ## Architecture
 - CLI entrypoint loads configuration.
-- Command listener controls capture start/stop.
-- Audio capture pipeline reads microphone input via `cpal` while recording is toggled on.
+- Evdev hotkey listener controls capture start/stop.
+- Audio capture pipeline reads microphone input via `cpal` while the configured key is held.
 - A buffer aggregates audio frames for post-recording inference.
 - Optional VAD trims trailing silence after release.
 - whisper.cpp runs inference on the captured buffer.
@@ -27,14 +27,15 @@ This document describes the technical design for the `sv` CLI that performs offl
 - CLI flags complement configuration and override file values when present.
 - Defaults are applied if keys are missing.
 - Configuration struct shared across pipeline components.
-- Add `mode` to select `stdout` (default) or `inject` for daemon output.
+- Use `[output] mode` to select `paste`, `clipboard`, `type`, or `stdout`.
+- Use `[hotkey] key` to configure the evdev hold-to-record key.
 - Config supports `model_language` and `model_size` selection with a default of the small general model.
 - Allow overriding the model install path (`model_path`) while keeping a default data directory.
 
 ### Audio Capture
 - Use `cpal` to select input device and stream 16 kHz mono.
 - Convert samples to `f32` normalized range [-1.0, 1.0].
-- Capture samples while recording is toggled on.
+- Capture samples while the configured key is held.
 
 ### Buffering
 - Store samples for the duration of the recording window.
@@ -44,11 +45,11 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Optional VAD to trim trailing silence after release.
 - Simple energy-based threshold to start; upgradeable later.
 
-### Command Control
+### Hotkey Control
 - Run `sv daemon start` to start the background service.
-- Run `sv` to send a toggle command to the daemon over a Unix socket.
+- Hold the configured evdev key to start recording; release it to stop and transcribe.
 - Store the socket in `${XDG_RUNTIME_DIR}/soundvibes/sv.sock`.
-- Provide actionable errors when the daemon socket is unavailable.
+- Keep socket commands for daemon lifecycle and external start/stop integration.
 
 ### Text Injection
 - Use a backend abstraction for output delivery.
@@ -57,8 +58,8 @@ This document describes the technical design for the `sv` CLI that performs offl
 - If injection is unavailable, fallback to stdout with a warning.
 
 ### Daemon Mode
-- Long-running process that listens for toggle commands on a Unix socket.
-- On toggle on, start capture; on toggle off, complete transcription.
+- Long-running process that listens for evdev key press/release events.
+- On key press, start capture; on key release, complete transcription.
 - On capture completion, either print or inject text based on `mode`.
 - Systemd user unit or foreground mode used to manage lifecycle.
 
@@ -98,12 +99,12 @@ This document describes the technical design for the `sv` CLI that performs offl
 
 ## Configuration
 - Format: TOML.
-- Example fields: `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `mode`.
+- Example fields: `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
 
 ## Data Flow
 1. CLI loads config and model.
-2. CLI toggle command starts audio capture in the daemon.
-3. Audio capture stores samples until toggle off.
+2. Configured key press starts audio capture in the daemon.
+3. Audio capture stores samples until key release.
 4. Optional VAD trims trailing silence.
 5. Inference runs on captured audio, returns final text.
 6. Output formatter prints or injects final result.
@@ -112,13 +113,13 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Missing model: exit code 2 with message.
 - No input device: exit code 3 with message.
 - Stream errors: log and exit gracefully.
-- Daemon socket missing: emit actionable guidance for starting `sv daemon start`.
+- Hotkey device access missing: emit actionable guidance for input permissions.
 
 ## Validation
-- Manual mic test with `sv` using a valid config file.
+- Manual mic test with a configured hold key.
 - Validate final transcript after capture stops.
 - Confirm offline operation by disconnecting network.
-- Validate socket toggle commands against the daemon.
+- Validate hold-to-record key press/release behavior.
 - Validate injection into a focused editor.
 - Validate GPU usage on NVIDIA/AMD systems by checking whisper.cpp startup logs, and verify CPU fallback on systems without a supported GPU backend.
 

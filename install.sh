@@ -367,16 +367,6 @@ install_binary() {
      chmod +x "$BIN_DIR/sv"
 
     print_success "Binary installed to ${BIN_DIR}/sv"
-
-    # Create wrapper script for KDE/desktop shortcuts
-    # KDE shortcuts don't inherit XDG_RUNTIME_DIR, so we need a wrapper
-    cat > "${BIN_DIR}/sv-toggle" << 'WRAPPER'
-#!/bin/bash
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-"$(dirname "$0")/sv"
-WRAPPER
-    chmod +x "${BIN_DIR}/sv-toggle"
-    print_success "Wrapper script installed to ${BIN_DIR}/sv-toggle (for KDE shortcuts)"
 }
 
 # Create configuration
@@ -422,6 +412,10 @@ dump_audio = false          # Save audio to WAV files for debugging
 
 [output]
 mode = "stdout"             # Options: paste, clipboard, type, stdout
+
+[hotkey]
+enabled = true
+key = "RIGHTCTRL"           # Use evtest KEY_* names without the KEY_ prefix
 EOF
         
         print_success "Configuration created at ${CONFIG_FILE}"
@@ -544,11 +538,6 @@ uninstall() {
         rm -f "${BIN_DIR}/sv"
         print_success "Binary removed from ${BIN_DIR}/sv"
     fi
-    if [ -f "${BIN_DIR}/sv-toggle" ]; then
-        rm -f "${BIN_DIR}/sv-toggle"
-        print_success "Wrapper script removed from ${BIN_DIR}/sv-toggle"
-    fi
-    
     # Ask about config and data
     if [ "$AUTO_YES" = false ]; then
         printf "Remove configuration and downloaded models? [y/N] "
@@ -577,7 +566,7 @@ print_summary() {
     
     printf "${BLUE}Quick Start:${NC}\n"
     printf "  1. Start the daemon: ${GREEN}sv daemon start${NC}\n"
-    printf "  2. Toggle recording: ${GREEN}sv${NC}\n"
+    printf "  2. Hold configured key: ${GREEN}RIGHTCTRL${NC}\n"
     printf "  3. Stop the daemon:  ${GREEN}sv daemon stop${NC}\n\n"
     
     printf "${BLUE}Files:${NC}\n"
@@ -592,10 +581,8 @@ print_summary() {
         printf "  Status:  ${GREEN}systemctl --user status sv.service${NC}\n\n"
     fi
     
-    printf "${BLUE}Window Manager Integration:${NC}\n"
-    printf "  i3/sway:  ${YELLOW}bindsym \$mod+Shift+v exec sv${NC}\n"
-    printf "  Hyprland: ${YELLOW}bind = SUPER, V, exec, sv${NC}\n"
-    printf "  KDE:      ${YELLOW}Use ${BIN_DIR}/sv-toggle for custom shortcuts${NC}\n\n"
+    printf "${BLUE}Hotkey:${NC}\n"
+    printf "  SoundVibes listens via evdev. Your user must be able to read /dev/input/event* devices.${NC}\n\n"
     
     printf "${BLUE}Documentation:${NC} https://github.com/kejne/soundvibes\n"
     printf "${BLUE}Issues:${NC} https://github.com/kejne/soundvibes/issues\n\n"

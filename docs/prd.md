@@ -8,8 +8,8 @@ This PRD is a living document and should be updated as product requirements and 
 ## Goals
 - Provide start/stop recording from the default microphone with transcription after capture stops.
 - Work fully offline with a small model and fast post-recording transcription.
-- Run as a background daemon that listens for control commands over a local socket.
-- Use the same binary: `sv daemon start` runs the service, `sv` toggles capture via the socket.
+- Run as a background daemon that listens for a configured evdev hold key.
+- Use `sv daemon start` to run the service; holding the configured key records, releasing it stops and transcribes.
 - Ship as a single Rust CLI binary plus an automatically downloaded model file.
 - Automatically accelerate inference on NVIDIA/AMD GPUs when available, otherwise fall back to CPU.
 - Enforce PR quality gates that match a single local command for tests and linting.
@@ -20,13 +20,12 @@ This PRD is a living document and should be updated as product requirements and 
 
 ## Scope
 - CLI that captures audio from the default input device.
-- Start/stop recording: capture audio while toggled on, transcribe and print when stopped.
+- Start/stop recording: capture audio while the configured key is held, transcribe and print when released.
 - Small offline model (whisper.cpp small with quantization by default).
 - Automatic GPU backend selection for NVIDIA/AMD devices with CPU fallback.
 - Configuration via `config.toml` in the XDG config directory.
 - Works on Linux x86_64.
-- Daemon mode that listens on a local socket and captures on toggle.
-- Socket-controlled CLI toggle for start/stop using the same binary.
+- Daemon mode that listens for evdev key press/release events.
 - Daemon mode can inject transcribed text at the cursor when requested.
 
 ## Non-Goals
@@ -38,11 +37,11 @@ This PRD is a living document and should be updated as product requirements and 
 
 ## User Experience
 - Command: `sv daemon start` to start the background service.
-- Command: `sv` to toggle capture state via the daemon socket.
+- Hold the configured key, for example `RIGHTCTRL`, to record.
 - Configure model and options in the config file, then run the daemon.
-- When capture is toggled on, start recording; when toggled off, transcribe and output.
+- When the key is pressed, start recording; when released, transcribe and output.
 - Errors are returned with actionable messages (missing model, no mic, unsupported device).
-- In daemon mode, the capture toggle injects text into the focused app instead of stdout.
+- In daemon mode, capture completion injects text into the focused app instead of stdout when configured.
 
 ## Output Behavior
 - One final transcript emitted after capture stops.
@@ -55,11 +54,11 @@ This PRD is a living document and should be updated as product requirements and 
 
 ## Architecture (High Level)
 - Audio capture: `cpal` for mic input at 16 kHz mono.
-- Push-to-talk buffer: capture while toggled on, stop on toggle off.
+- Push-to-talk buffer: capture while the configured key is held, stop on release.
 - Optional VAD: trim trailing silence after release.
 - Inference: whisper.cpp via Rust FFI bindings, using quantized small models with GPU acceleration when available.
 - Output: final text output to stdout after transcription completes.
-- Control plane: daemon listens on a local socket for toggle commands.
+- Control plane: daemon listens for evdev key events and keeps a local socket for lifecycle commands.
 - Text injection: Wayland portal virtual keyboard or X11 XTest.
 
 ## Model Choice
@@ -83,13 +82,13 @@ This PRD is a living document and should be updated as product requirements and 
 - Load config from XDG base directory if available.
 - Default path: `${XDG_CONFIG_HOME:-~/.config}/soundvibes/config.toml`.
 - Config file format: TOML.
-- Config keys: `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `mode`.
+- Config keys: `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
 
 ## Validation Plan
 - Manual test on Linux laptop with default microphone.
-- Verify transcript appears shortly after toggling capture off.
+- Verify transcript appears shortly after releasing the configured key.
 - Confirm tool runs without network access.
-- Validate daemon socket toggle from the CLI.
+- Validate daemon hold-to-record control.
 - Validate text injection into a focused editor.
 - Validate CI runs the same quality gate command as local development.
 
@@ -98,5 +97,5 @@ This PRD is a living document and should be updated as product requirements and 
 - Missing GPU runtime: fall back to CPU and document GPU prerequisites.
 - Audio capture issues on some devices: provide device selection flag.
 - Model size too large: allow user to swap model via CLI flag.
-- Daemon not running: surface an actionable error from the CLI toggle.
+- Hotkey permissions vary by distro: document input group or udev setup.
 - Text injection permissions vary by compositor: document portal prompts and limitations.

@@ -409,9 +409,6 @@ sample_rate = 16000         # Hz
 format = "plain"            # Options: plain, jsonl
 language = "en"             # Transcription language
 
-[output]
-mode = "stdout"             # Options: paste, clipboard, type, stdout
-
 # VAD (Voice Activity Detection) settings
 vad = "on"                  # Options: on, off
 vad_silence_ms = 1200       # Silence timeout in milliseconds
@@ -422,6 +419,9 @@ vad_chunk_ms = 100          # Chunk size in milliseconds
 debug_audio = false
 debug_vad = false
 dump_audio = false          # Save audio to WAV files for debugging
+
+[output]
+mode = "stdout"             # Options: paste, clipboard, type, stdout
 EOF
         
         print_success "Configuration created at ${CONFIG_FILE}"

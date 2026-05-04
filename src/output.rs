@@ -299,7 +299,7 @@ fn copy_plain_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), Out
 }
 
 fn type_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputError> {
-    let script = format!("type {text}\n");
+    let script = dotool_type_script(text);
     let status = runner
         .status_with_stdin("dotool", &[], script.as_bytes())
         .map_err(|err| {
@@ -316,6 +316,29 @@ fn type_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputErr
             "dotool typing exited with status {status}"
         )))
     }
+}
+
+fn dotool_type_script(text: &str) -> String {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        match ch {
+            '\n' => {
+                if !current.is_empty() {
+                    lines.push(format!("type {current}"));
+                    current.clear();
+                }
+                lines.push("key enter".to_string());
+            }
+            '\r' => {}
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        lines.push(format!("type {current}"));
+    }
+    lines.push(String::new());
+    lines.join("\n")
 }
 
 fn send_paste_key(
@@ -646,6 +669,25 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&runner.commands[0].stdin),
             "type typed text\n"
+        );
+    }
+
+    #[test]
+    fn type_mode_splits_multiline_text_into_safe_dotool_commands() {
+        let mut runner = FakeRunner::default();
+        runner.push_status_success();
+
+        output_text_with_runner(
+            "first\nkey leftctrl+v\nthird",
+            OutputMode::Type,
+            &OutputConfig::default(),
+            &mut runner,
+        )
+        .expect("type output should succeed");
+
+        assert_eq!(
+            String::from_utf8_lossy(&runner.commands[0].stdin),
+            "type first\nkey enter\ntype key leftctrl+v\nkey enter\ntype third\n"
         );
     }
 }

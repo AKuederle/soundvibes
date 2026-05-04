@@ -1,5 +1,5 @@
 use std::ffi::{c_void, CStr, CString, NulError};
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_int};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::NonNull;
@@ -20,6 +20,17 @@ pub mod bindings {
 }
 
 use bindings::*;
+
+unsafe extern "C" {
+    fn sv_whisper_full_configured(
+        ctx: *mut whisper_context,
+        samples: *const f32,
+        n_samples: c_int,
+        language: *const c_char,
+        detect_language: bool,
+        n_threads: c_int,
+    ) -> c_int;
+}
 
 #[derive(Debug)]
 pub enum WhisperError {
@@ -155,20 +166,10 @@ impl WhisperContext {
         samples: &[f32],
         language: Option<&str>,
     ) -> Result<String, WhisperError> {
-        let mut params = unsafe {
-            whisper_full_default_params(whisper_sampling_strategy_WHISPER_SAMPLING_GREEDY)
-        };
-        params.print_progress = false;
-        params.print_realtime = false;
-        params.print_timestamps = false;
-        params.no_timestamps = true;
-        params.single_segment = true;
-        params.translate = false;
         let available_threads = thread::available_parallelism()
             .map(|count| count.get())
             .unwrap_or(1);
         let n_threads = (available_threads / 2).max(1) as i32;
-        params.n_threads = n_threads;
 
         let detect_language = language.is_none();
         let language_cstring;
@@ -178,15 +179,15 @@ impl WhisperContext {
         } else {
             std::ptr::null()
         };
-        params.language = language_ptr;
-        params.detect_language = detect_language;
 
         let result = unsafe {
-            whisper_full(
+            sv_whisper_full_configured(
                 self.ctx.as_ptr(),
-                params,
                 samples.as_ptr(),
                 samples.len() as i32,
+                language_ptr,
+                detect_language,
+                n_threads,
             )
         };
         if result != 0 {

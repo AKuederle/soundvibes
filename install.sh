@@ -237,82 +237,37 @@ install_deps() {
     print_success "System dependencies installed"
 }
 
-# Setup ydotool permissions (uinput access)
-setup_ydotool_permissions() {
-    # Check if ydotool can already access uinput
-    if [ -S "/run/user/$(id -u)/.ydotool_socket" ] || [ -S "/tmp/.ydotool_socket" ]; then
-        print_success "ydotool daemon is already running"
-        return
-    fi
-
-    print_info "Setting up ydotool permissions..."
-
-    # Check if udev rule exists and has correct content
-    UDEV_RULE="/etc/udev/rules.d/80-uinput.rules"
-    UDEV_RULE_CONTENT='KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"'
-    if [ ! -f "$UDEV_RULE" ] || ! grep -q "static_node=uinput" "$UDEV_RULE" 2>/dev/null; then
-        print_info "Creating udev rule for uinput access..."
-        echo "$UDEV_RULE_CONTENT" | sudo tee "$UDEV_RULE" > /dev/null
-        sudo udevadm control --reload-rules
-        # Reload uinput module to apply new permissions
-        sudo modprobe -r uinput 2>/dev/null || true
-        sudo modprobe uinput
-        sudo udevadm trigger
-        print_success "udev rule created"
-    fi
-
-    # Check if user is in input group
-    if ! groups | grep -q '\binput\b'; then
-        print_info "Adding user to input group..."
-        sudo usermod -aG input "$USER"
-        print_warn "You need to LOG OUT and LOG BACK IN for group changes to take effect"
-        print_info "After logging back in, run: systemctl --user start ydotool.service"
-    else
-        print_success "User is already in input group"
-        # Try to start the service
-        if systemctl --user start ydotool.service 2>/dev/null; then
-            print_success "ydotool daemon started"
-        else
-            print_info "Start ydotool with: systemctl --user enable --now ydotool.service"
-        fi
-    fi
-}
-
-# Install text injection tools
+# Install Wayland paste tools
 install_text_injection() {
-    print_header "Text Injection Tools"
-
-    # Check for ydotool first (works on both Wayland and X11, recommended for KDE Plasma)
-    if command_exists ydotool; then
-        print_success "ydotool is already installed (recommended, works on all desktops)"
-        setup_ydotool_permissions
-    else
-        print_info "ydotool is recommended for universal text injection (works on KDE Plasma, GNOME, X11)"
-        print_info "To install ydotool:"
-        case "$DISTRO" in
-            ubuntu|debian)
-                print_info "  sudo apt-get install ydotool"
-                ;;
-            arch|manjaro)
-                print_info "  sudo pacman -S ydotool"
-                ;;
-            fedora)
-                print_info "  sudo dnf install ydotool"
-                ;;
-            *)
-                print_info "  Check your distribution's package manager"
-                ;;
-        esac
-        print_info "After installing, run this script again to set up permissions"
-    fi
+    print_header "Wayland Paste Tools"
 
     if [ -n "$WAYLAND_DISPLAY" ]; then
         print_info "Wayland display server detected"
 
-        if command_exists wtype; then
-            print_success "wtype is already installed (fallback for Wayland)"
+        if command_exists wl-copy && command_exists wl-paste; then
+            print_success "wl-clipboard is already installed"
         else
-            print_info "Installing wtype for Wayland text injection (fallback)..."
+            print_info "Installing wl-clipboard for clipboard capture and restore..."
+            case "$DISTRO" in
+                ubuntu|debian)
+                    sudo apt-get install -y wl-clipboard
+                    ;;
+                arch|manjaro)
+                    sudo pacman -S --needed --noconfirm wl-clipboard
+                    ;;
+                fedora)
+                    sudo dnf install -y wl-clipboard
+                    ;;
+                *)
+                    print_warn "Please install wl-clipboard manually for paste mode"
+                    ;;
+            esac
+        fi
+
+        if command_exists wtype; then
+            print_success "wtype is already installed"
+        else
+            print_info "Installing wtype for automatic paste key simulation..."
 
             case "$DISTRO" in
                 ubuntu|debian)
@@ -340,37 +295,18 @@ install_text_injection() {
 
         # Note about KDE Plasma
         if [ "$XDG_CURRENT_DESKTOP" = "KDE" ]; then
-            print_warn "KDE Plasma detected: wtype may not work due to missing protocol support"
-            print_info "Use ydotool instead: sudo pacman -S ydotool && sudo systemctl enable --now ydotool"
+            print_info "KDE Plasma detected: paste mode suppresses Klipper history for temporary transcription copies."
+            print_info "If wtype is blocked by your compositor, use mode = \"clipboard\" and paste manually."
         fi
 
     elif [ -n "$DISPLAY" ]; then
         print_info "X11 display server detected"
-
-        if command_exists xdotool; then
-            print_success "xdotool is already installed"
-        else
-            print_info "Installing xdotool for X11 text injection..."
-
-            case "$DISTRO" in
-                ubuntu|debian)
-                    sudo apt-get install -y xdotool
-                    ;;
-                arch|manjaro)
-                    sudo pacman -S --needed --noconfirm xdotool
-                    ;;
-                fedora)
-                    sudo dnf install -y xdotool
-                    ;;
-                *)
-                    print_warn "Please install xdotool manually for X11 support"
-                    ;;
-            esac
-        fi
+        print_warn "Automatic paste mode is Wayland-focused and requires wl-clipboard plus wtype."
+        print_info "Use mode = \"stdout\" or mode = \"clipboard\" on X11 until native X11 paste support is added."
 
     else
         print_warn "Could not detect display server (neither Wayland nor X11)"
-        print_info "Text injection will not work. Install ydotool (universal), wtype (Wayland) or xdotool (X11) manually."
+        print_info "Install wl-clipboard and wtype for automatic Wayland paste mode."
     fi
 }
 

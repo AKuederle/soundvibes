@@ -1257,6 +1257,7 @@ version = "0.1.0"
 dependencies = [
  "alsa-sys",
  "bindgen 0.71.1",
+ "cc",
  "chrono",
  "clap",
  "cmake",

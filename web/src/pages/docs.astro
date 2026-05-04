@@ -105,7 +105,7 @@ import BaseLayout from "../layouts/BaseLayout.astro";
             </li>
             <li class="flex items-center gap-2">
               <span class="h-2 w-2 rounded-full bg-ink"></span>
-              wtype (Wayland) or xdotool (X11) for injection
+              wl-clipboard and wtype for Wayland paste mode
             </li>
           </ul>
 
@@ -225,7 +225,12 @@ sample_rate = 16000            # Hz (16000 recommended)
 
 # Output settings
 format = "plain"               # plain, jsonl
-mode = "inject"                # stdout, inject
+	[output]
+	mode = "paste"                 # paste, clipboard, type, stdout
+	paste_keys = "ctrl+v"
+	restore_clipboard = true
+	pre_paste_delay_ms = 100
+	restore_clipboard_delay_ms = 250
 
 # VAD (Voice Activity Detection) settings
 vad = "on"                     # on, off (or true/false)
@@ -510,10 +515,10 @@ list_devices = false</code></pre>
 
         <div class="grid gap-4 sm:grid-cols-2">
           <div class="glass-card rounded-xl p-5">
-            <p class="text-xs font-semibold uppercase tracking-[0.2em] text-ink/50 mb-2">Mode: inject</p>
-            <p class="font-semibold text-ink mb-2">Type text at cursor (default)</p>
+            <p class="text-xs font-semibold uppercase tracking-[0.2em] text-ink/50 mb-2">Mode: paste</p>
+            <p class="font-semibold text-ink mb-2">Paste text at cursor (default)</p>
             <p class="text-sm text-ink/70">
-              Transcribed text is automatically typed at your cursor position. Uses wtype on Wayland or xdotool on X11.
+              Transcribed text is copied with a KDE history-suppression hint, pasted with wtype, and the previous clipboard is restored.
             </p>
           </div>
           <div class="glass-card rounded-xl p-5">
@@ -543,18 +548,18 @@ list_devices = false</code></pre>
         </div>
 
         <div class="glass-card rounded-2xl p-5">
-          <p class="font-semibold text-ink mb-3">Text Injection Requirements</p>
+          <p class="font-semibold text-ink mb-3">Paste Mode Requirements</p>
           <p class="text-sm text-ink/70 mb-3">
-            For <code class="font-mono">mode = "inject"</code> to work, you need the appropriate tool for your display server:
+            For <code class="font-mono">mode = "paste"</code> to work, install the Wayland clipboard and paste-key tools:
           </p>
           <ul class="space-y-2 text-sm text-ink/70">
             <li class="flex items-center gap-2">
               <span class="h-2 w-2 rounded-full bg-mint"></span>
-              <strong>Wayland:</strong> Install <code class="font-mono">wtype</code> (virtual keyboard)
+              <strong>Clipboard:</strong> Install <code class="font-mono">wl-clipboard</code> for <code class="font-mono">wl-copy</code> and <code class="font-mono">wl-paste</code>
             </li>
             <li class="flex items-center gap-2">
               <span class="h-2 w-2 rounded-full bg-citrus"></span>
-              <strong>X11:</strong> Install <code class="font-mono">xdotool</code> (XTest extension)
+              <strong>Paste key:</strong> Install <code class="font-mono">wtype</code> for automatic <code class="font-mono">Ctrl+V</code>
             </li>
           </ul>
         </div>
@@ -857,11 +862,11 @@ sv
           </div>
 
           <div class="glass-card rounded-2xl p-5">
-            <p class="font-semibold text-ink mb-3">Text Injection Not Working</p>
+            <p class="font-semibold text-ink mb-3">Paste Mode Not Working</p>
             <ul class="space-y-2 text-sm text-ink/70">
               <li class="flex items-start gap-2">
                 <span class="h-2 w-2 rounded-full bg-mint mt-1.5"></span>
-                <span>Verify wtype (Wayland) or xdotool (X11) is installed</span>
+                <span>Verify wl-copy, wl-paste, and wtype are installed</span>
               </li>
               <li class="flex items-start gap-2">
                 <span class="h-2 w-2 rounded-full bg-mint mt-1.5"></span>

@@ -63,6 +63,13 @@ fn main() {
         }
     }
 
+    cc::Build::new()
+        .cpp(true)
+        .file("src/whisper_shim.cpp")
+        .include(whisper_dir.join("include"))
+        .include(whisper_dir.join("ggml/include"))
+        .compile("sv_whisper_shim");
+
     let header_path = whisper_dir.join("include/whisper.h");
     println!("cargo:rerun-if-changed={}", header_path.display());
 
@@ -79,14 +86,10 @@ fn main() {
         .allowlist_function("whisper_free")
         .allowlist_function("whisper_log_set")
         .allowlist_function("whisper_vad_.*")
-        .allowlist_type("whisper_context")
-        .allowlist_type("whisper_context_params")
-        .allowlist_type("whisper_full_params")
-        .allowlist_type("ggml_log_callback")
-        .allowlist_type("ggml_log_level")
-        .allowlist_type("whisper_sampling_strategy")
-        .allowlist_type("whisper_vad_.*")
+        .allowlist_type("whisper_.*")
+        .allowlist_type("ggml_.*")
         .allowlist_var("whisper_sampling_strategy_.*")
+        .layout_tests(false)
         .generate()
         .expect("Unable to generate whisper bindings");
 

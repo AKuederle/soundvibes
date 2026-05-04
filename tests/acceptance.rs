@@ -16,6 +16,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "test-support")]
+use std::os::unix::process::ExitStatusExt;
+#[cfg(feature = "test-support")]
+use std::process::{ExitStatus, Output};
+#[cfg(feature = "test-support")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "test-support")]
@@ -28,7 +32,9 @@ use sv::daemon::test_support::{
 #[cfg(feature = "test-support")]
 use sv::daemon::{DaemonConfig, DaemonDeps};
 #[cfg(feature = "test-support")]
-use sv::types::{AudioHost, OutputFormat, OutputMode, VadMode};
+use sv::output::{OutputConfig, OutputMode};
+#[cfg(feature = "test-support")]
+use sv::types::{AudioHost, OutputFormat, VadMode};
 
 #[test]
 fn at01_daemon_starts_with_valid_model() -> Result<(), Box<dyn Error>> {
@@ -215,6 +221,7 @@ fn at04_daemon_toggle_captures_and_transcribes() -> Result<(), Box<dyn Error>> {
         sample_rate: 16_000,
         format: OutputFormat::Plain,
         mode: OutputMode::Stdout,
+        output: OutputConfig::default(),
         vad: VadMode::Off,
         vad_silence_ms: 800,
         vad_threshold: 0.015,
@@ -222,6 +229,9 @@ fn at04_daemon_toggle_captures_and_transcribes() -> Result<(), Box<dyn Error>> {
         debug_audio: false,
         debug_vad: false,
         dump_audio: false,
+        vad_model_path: None,
+        audio_feedback: false,
+        no_speech_timeout_ms: 0,
     };
 
     let shutdown_trigger = Arc::clone(&shutdown);
@@ -265,6 +275,7 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
         sample_rate: 16_000,
         format: OutputFormat::Jsonl,
         mode: OutputMode::Stdout,
+        output: OutputConfig::default(),
         vad: VadMode::Off,
         vad_silence_ms: 800,
         vad_threshold: 0.015,
@@ -272,6 +283,9 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
         debug_audio: false,
         debug_vad: false,
         dump_audio: false,
+        vad_model_path: None,
+        audio_feedback: false,
+        no_speech_timeout_ms: 0,
     };
 
     let shutdown_trigger = Arc::clone(&shutdown);
@@ -466,6 +480,56 @@ fn at10_marketing_site_builds_and_smoke_test() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[cfg(feature = "test-support")]
+#[test]
+fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn Error>> {
+    let _wayland_guard = EnvGuard::set("WAYLAND_DISPLAY", "wayland-0");
+    let mut runner = AcceptanceRunner::default();
+    runner.push_output(0, b"text/html\ntext/plain\n");
+    runner.push_output(0, b"<b>old</b>");
+    runner.push_output(0, b"");
+    runner.push_status(0);
+
+    sv::output::output_text_with_runner(
+        "new text",
+        OutputMode::Paste,
+        &OutputConfig::default(),
+        &mut runner,
+    )?;
+
+    assert_eq!(runner.commands.len(), 5);
+    assert_command(&runner.commands[0], "wl-paste", &["--list-types"], b"");
+    assert_command(
+        &runner.commands[1],
+        "wl-paste",
+        &["--type", "text/html"],
+        b"",
+    );
+    assert_command(
+        &runner.commands[2],
+        "temporary-clipboard-copy",
+        &["text/plain", "x-kde-passwordManagerHint"],
+        b"new text",
+    );
+    assert_command(
+        &runner.commands[3],
+        "wtype",
+        &["-M", "ctrl", "-k", "v", "-m", "ctrl"],
+        b"",
+    );
+    assert_command(
+        &runner.commands[4],
+        "wl-copy",
+        &["--type", "text/html"],
+        b"<b>old</b>",
+    );
+    assert_eq!(
+        runner.sleeps,
+        vec![Duration::from_millis(100), Duration::from_millis(250)]
+    );
+    Ok(())
+}
+
 fn command_available(command: &str) -> bool {
     Command::new(command)
         .arg("--version")
@@ -474,6 +538,88 @@ fn command_available(command: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AcceptanceCommand {
+    program: String,
+    args: Vec<String>,
+    stdin: Vec<u8>,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct AcceptanceRunner {
+    commands: Vec<AcceptanceCommand>,
+    outputs: Vec<Output>,
+    statuses: Vec<ExitStatus>,
+    sleeps: Vec<Duration>,
+}
+
+#[cfg(feature = "test-support")]
+impl AcceptanceRunner {
+    fn push_output(&mut self, status: i32, stdout: &[u8]) {
+        self.outputs.push(Output {
+            status: ExitStatus::from_raw(status),
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        });
+    }
+
+    fn push_status(&mut self, status: i32) {
+        self.statuses.push(ExitStatus::from_raw(status));
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl sv::output::CommandRunner for AcceptanceRunner {
+    fn output(&mut self, program: &str, args: &[String]) -> Result<Output, std::io::Error> {
+        self.commands.push(AcceptanceCommand {
+            program: program.to_string(),
+            args: args.to_vec(),
+            stdin: Vec::new(),
+        });
+        Ok(self.outputs.remove(0))
+    }
+
+    fn status_with_stdin(
+        &mut self,
+        program: &str,
+        args: &[String],
+        stdin: &[u8],
+    ) -> Result<ExitStatus, std::io::Error> {
+        self.commands.push(AcceptanceCommand {
+            program: program.to_string(),
+            args: args.to_vec(),
+            stdin: stdin.to_vec(),
+        });
+        Ok(self.statuses.remove(0))
+    }
+
+    fn copy_temporary_text(&mut self, text: &str) -> Result<(), sv::output::OutputError> {
+        self.commands.push(AcceptanceCommand {
+            program: "temporary-clipboard-copy".to_string(),
+            args: vec![
+                "text/plain".to_string(),
+                "x-kde-passwordManagerHint".to_string(),
+            ],
+            stdin: text.as_bytes().to_vec(),
+        });
+        Ok(())
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        self.sleeps.push(duration);
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn assert_command(command: &AcceptanceCommand, program: &str, args: &[&str], stdin: &[u8]) {
+    let expected_args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    assert_eq!(command.program, program);
+    assert_eq!(command.args, expected_args);
+    assert_eq!(command.stdin, stdin);
 }
 
 fn model_path() -> Result<PathBuf, Box<dyn Error>> {

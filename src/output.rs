@@ -1,32 +1,43 @@
 use std::env;
 use std::fmt;
-use std::io::Read as _;
-use std::path::Path;
-use std::process::Command;
+use std::io::Write as _;
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
-use crate::types::InjectBackend;
+use clap::ValueEnum;
+use serde::Deserialize;
 
-/// Known terminal emulator window classes (lowercase for comparison)
-const TERMINAL_CLASSES: &[&str] = &[
-    "konsole",
-    "org.kde.konsole",
-    "kitty",
-    "alacritty",
-    "gnome-terminal",
-    "org.gnome.terminal",
-    "xterm",
-    "urxvt",
-    "terminator",
-    "tilix",
-    "xfce4-terminal",
-    "mate-terminal",
-    "lxterminal",
-    "st",
-    "foot",
-    "wezterm",
-    "com.mitchellh.ghostty",
-    "ghostty",
-];
+const MAX_CLIPBOARD_BYTES: usize = 100 * 1024 * 1024;
+const KDE_SECRET_MIME: &str = "x-kde-passwordManagerHint";
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputMode {
+    Stdout,
+    Paste,
+    Clipboard,
+    Type,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct OutputConfig {
+    pub paste_keys: String,
+    pub restore_clipboard: bool,
+    pub pre_paste_delay_ms: u64,
+    pub restore_clipboard_delay_ms: u64,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            paste_keys: "ctrl+v".to_string(),
+            restore_clipboard: true,
+            pre_paste_delay_ms: 100,
+            restore_clipboard_delay_ms: 250,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct OutputError {
@@ -47,330 +58,441 @@ impl fmt::Display for OutputError {
     }
 }
 
-pub fn inject_text(text: &str, backend: InjectBackend) -> Result<(), OutputError> {
-    match backend {
-        InjectBackend::Ydotool => {
-            if let Some(err) = try_ydotool(text)? {
-                Err(OutputError::new(err))
-            } else {
-                Ok(())
-            }
+impl std::error::Error for OutputError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardSnapshot {
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedPasteKey {
+    modifiers: Vec<KeyName>,
+    key: KeyName,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum KeyName {
+    Ctrl,
+    Shift,
+    Alt,
+    Super,
+    V,
+    Insert,
+    Enter,
+}
+
+pub trait CommandRunner {
+    fn output(&mut self, program: &str, args: &[String]) -> Result<Output, std::io::Error>;
+    fn status_with_stdin(
+        &mut self,
+        program: &str,
+        args: &[String],
+        stdin: &[u8],
+    ) -> Result<std::process::ExitStatus, std::io::Error>;
+    fn copy_temporary_text(&mut self, text: &str) -> Result<(), OutputError>;
+    fn sleep(&mut self, duration: Duration);
+}
+
+struct SystemRunner;
+
+impl CommandRunner for SystemRunner {
+    fn output(&mut self, program: &str, args: &[String]) -> Result<Output, std::io::Error> {
+        Command::new(program).args(args).output()
+    }
+
+    fn status_with_stdin(
+        &mut self,
+        program: &str,
+        args: &[String],
+        stdin: &[u8],
+    ) -> Result<std::process::ExitStatus, std::io::Error> {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Some(mut child_stdin) = child.stdin.take() {
+            child_stdin.write_all(stdin)?;
         }
-        InjectBackend::Wtype => {
-            if let Some(err) = try_wayland(text)? {
-                Err(OutputError::new(err))
-            } else {
-                Ok(())
-            }
-        }
-        InjectBackend::Xdotool => {
-            if let Some(err) = try_x11(text)? {
-                Err(OutputError::new(err))
-            } else {
-                Ok(())
-            }
-        }
-        InjectBackend::Auto => inject_text_auto(text),
+        child.wait()
+    }
+
+    fn copy_temporary_text(&mut self, text: &str) -> Result<(), OutputError> {
+        use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
+
+        let sources = vec![
+            MimeSource {
+                source: Source::Bytes(text.as_bytes().into()),
+                mime_type: MimeType::Text,
+            },
+            MimeSource {
+                source: Source::Bytes(b"secret"[..].into()),
+                mime_type: MimeType::Specific(KDE_SECRET_MIME.to_string()),
+            },
+        ];
+
+        Options::new()
+            .copy_multi(sources)
+            .map_err(|err| OutputError::new(format!("clipboard copy failed: {err}")))
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
     }
 }
 
-fn inject_text_auto(text: &str) -> Result<(), OutputError> {
-    let mut errors = Vec::new();
+pub fn output_text(text: &str, mode: OutputMode, config: &OutputConfig) -> Result<(), OutputError> {
+    let mut runner = SystemRunner;
+    output_text_with_runner(text, mode, config, &mut runner)
+}
 
-    // Try clipboard paste first - instant and avoids modifier key conflicts
-    if let Some(err) = try_clipboard_paste(text)? {
-        errors.push(err);
-    } else {
+pub fn output_text_with_runner(
+    text: &str,
+    mode: OutputMode,
+    config: &OutputConfig,
+    runner: &mut dyn CommandRunner,
+) -> Result<(), OutputError> {
+    if text.is_empty() {
         return Ok(());
     }
 
-    // Try ydotool - works on both Wayland and X11 via kernel uinput
-    if let Some(err) = try_ydotool(text)? {
-        errors.push(err);
+    match mode {
+        OutputMode::Stdout => Ok(()),
+        OutputMode::Paste => paste_text(text, config, runner),
+        OutputMode::Clipboard => copy_plain_text(text, runner),
+        OutputMode::Type => type_text(text, runner),
+    }
+}
+
+fn paste_text(
+    text: &str,
+    config: &OutputConfig,
+    runner: &mut dyn CommandRunner,
+) -> Result<(), OutputError> {
+    ParsedPasteKey::parse(&config.paste_keys)?;
+    let original = if config.restore_clipboard {
+        read_clipboard_snapshot(runner)?
     } else {
-        return Ok(());
-    }
-
-    // Try Wayland backend
-    if let Some(err) = try_wayland(text)? {
-        errors.push(err);
-    } else {
-        return Ok(());
-    }
-
-    // Try X11 backend
-    if let Some(err) = try_x11(text)? {
-        errors.push(err);
-    } else {
-        return Ok(());
-    }
-
-    Err(OutputError::new(format!(
-        "no supported injection backends available ({})",
-        errors.join("; ")
-    )))
-}
-
-/// Copy text to clipboard with Klipper-hidden hint using wl-clipboard-rs.
-/// Offers both text/plain and x-kde-passwordManagerHint MIME types so Klipper
-/// skips recording this entry in its history.
-fn clipboard_copy_secret(text: &str) -> Result<(), String> {
-    use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
-
-    let sources = vec![
-        MimeSource {
-            source: Source::Bytes(text.as_bytes().into()),
-            mime_type: MimeType::Text,
-        },
-        MimeSource {
-            source: Source::Bytes(b"secret"[..].into()),
-            mime_type: MimeType::Specific("x-kde-passwordManagerHint".to_string()),
-        },
-    ];
-
-    Options::new()
-        .copy_multi(sources)
-        .map_err(|e| format!("clipboard copy failed: {e}"))
-}
-
-/// Save current clipboard contents (returns None if clipboard is empty).
-fn clipboard_save() -> Option<Vec<u8>> {
-    use wl_clipboard_rs::paste;
-
-    let (mut reader, _mime) = paste::get_contents(
-        paste::ClipboardType::Regular,
-        paste::Seat::Unspecified,
-        paste::MimeType::Any,
-    )
-    .ok()?;
-
-    let mut buf = Vec::new();
-    reader.read_to_end(&mut buf).ok()?;
-    Some(buf)
-}
-
-/// Restore previously saved clipboard contents (with secret hint so Klipper
-/// doesn't record the restore as a new history entry).
-fn clipboard_restore(data: &[u8]) -> Result<(), String> {
-    use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
-
-    let sources = vec![
-        MimeSource {
-            source: Source::Bytes(data.into()),
-            mime_type: MimeType::Text,
-        },
-        MimeSource {
-            source: Source::Bytes(b"secret"[..].into()),
-            mime_type: MimeType::Specific("x-kde-passwordManagerHint".to_string()),
-        },
-    ];
-
-    Options::new()
-        .copy_multi(sources)
-        .map_err(|e| format!("clipboard restore failed: {e}"))
-}
-
-/// Clear the clipboard.
-fn clipboard_clear() -> Result<(), String> {
-    use wl_clipboard_rs::copy::{self, ClipboardType, Seat};
-
-    copy::clear(ClipboardType::Regular, Seat::All)
-        .map_err(|e| format!("clipboard clear failed: {e}"))
-}
-
-/// Try clipboard paste: copy to clipboard, then simulate Ctrl+V or Ctrl+Shift+V
-fn try_clipboard_paste(text: &str) -> Result<Option<String>, OutputError> {
-    if !has_ydotool() {
-        return Ok(Some(
-            "clipboard paste requires ydotool for key simulation".to_string()
-        ));
-    }
-
-    // Save current clipboard contents
-    let previous_clipboard = clipboard_save();
-
-    // Copy text to clipboard with Klipper-hidden hint
-    if let Err(msg) = clipboard_copy_secret(text) {
-        return Ok(Some(msg));
-    }
-
-    // Detect if focused window is a terminal
-    let is_terminal = is_focused_window_terminal();
-
-    // Simulate paste: Ctrl+V for normal apps, Ctrl+Shift+V for terminals
-    // Key codes: 29=LCtrl, 42=LShift, 47=V
-    let key_sequence = if is_terminal {
-        // Ctrl+Shift+V: Ctrl down, Shift down, V down, V up, Shift up, Ctrl up
-        vec!["29:1", "42:1", "47:1", "47:0", "42:0", "29:0"]
-    } else {
-        // Ctrl+V: Ctrl down, V down, V up, Ctrl up
-        vec!["29:1", "47:1", "47:0", "29:0"]
+        None
     };
+    let paste_result = (|| {
+        copy_temporary_text(text, runner)?;
+        runner.sleep(Duration::from_millis(config.pre_paste_delay_ms));
+        send_paste_key(config, runner)
+    })();
 
-    let args: Vec<&str> = std::iter::once("key")
-        .chain(key_sequence.into_iter())
-        .collect();
-
-    let result = match Command::new("ydotool").args(&args).status() {
-        Ok(status) if status.success() => Ok(None),
-        Ok(status) => Ok(Some(format!("ydotool exited with status {status}"))),
-        Err(e) => Ok(Some(format!("failed to run ydotool: {e}"))),
-    };
-
-    // Give the target application time to read the clipboard before restoring
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    // Restore previous clipboard contents or clear
-    if let Some(prev) = &previous_clipboard {
-        let _ = clipboard_restore(prev);
-    } else {
-        let _ = clipboard_clear();
-    }
-
-    result
-}
-
-/// Check if the currently focused window is a terminal emulator
-fn is_focused_window_terminal() -> bool {
-    // Try kdotool (KDE Wayland)
-    if let Ok(output) = Command::new("kdotool")
-        .args(["getactivewindow", "getwindowclassname"])
-        .output()
-    {
-        if output.status.success() {
-            let class = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
-            return TERMINAL_CLASSES.iter().any(|t| class.contains(t));
+    if config.restore_clipboard {
+        runner.sleep(Duration::from_millis(config.restore_clipboard_delay_ms));
+        if let Err(err) = restore_clipboard_snapshot(original.as_ref(), runner) {
+            eprintln!("warn: failed to restore clipboard: {err}");
         }
     }
 
-    // Try xdotool (X11)
-    if let Ok(output) = Command::new("xdotool")
-        .args(["getactivewindow", "getwindowclassname"])
-        .output()
-    {
-        if output.status.success() {
-            let class = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
-            return TERMINAL_CLASSES.iter().any(|t| class.contains(t));
-        }
-    }
-
-    // Can't detect, assume not terminal (use Ctrl+V)
-    false
+    paste_result
 }
 
-fn try_ydotool(text: &str) -> Result<Option<String>, OutputError> {
-    if !has_ydotool() {
-        return Ok(Some(
-            "ydotoold not running; start with `systemctl --user start ydotool.service` \
-             (see README for uinput permissions setup)".to_string()
-        ));
+fn read_clipboard_snapshot(
+    runner: &mut dyn CommandRunner,
+) -> Result<Option<ClipboardSnapshot>, OutputError> {
+    if env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Ok(None);
     }
 
-    match run_command(
-        "ydotool",
-        &["type", "-d", "0", "--", text],
-        "install ydotool and run `systemctl --user start ydotool.service`",
-    ) {
-        Ok(()) => Ok(None),
-        Err(err) => Ok(Some(format!("ydotool: {err}"))),
-    }
-}
-
-fn has_ydotool() -> bool {
-    let uid = unsafe { libc::getuid() };
-    let socket_paths = [
-        format!("/run/user/{}/.ydotool_socket", uid),
-        "/tmp/.ydotool_socket".to_string(),
-    ];
-    socket_paths.iter().any(|p| Path::new(p).exists())
-}
-
-fn try_wayland(text: &str) -> Result<Option<String>, OutputError> {
-    if !has_wayland_session() {
-        return Ok(Some("wayland session not detected".to_string()));
-    }
-
-    match run_command(
-        "wtype",
-        &["--", text],
-        "install wtype to enable Wayland text injection",
-    ) {
-        Ok(()) => Ok(None),
-        Err(err) => Ok(Some(format!("wayland: {err}"))),
-    }
-}
-
-fn try_x11(text: &str) -> Result<Option<String>, OutputError> {
-    if !has_x11_session() {
-        return Ok(Some("x11 session not detected".to_string()));
-    }
-
-    match run_command(
-        "xdotool",
-        &["type", "--clearmodifiers", "--delay", "0", "--", text],
-        "install xdotool to enable X11 text injection",
-    ) {
-        Ok(()) => Ok(None),
-        Err(err) => Ok(Some(format!("x11: {err}"))),
-    }
-}
-
-fn has_wayland_session() -> bool {
-    if let Ok(value) = env::var("XDG_SESSION_TYPE") {
-        if value.eq_ignore_ascii_case("wayland") {
-            return true;
-        }
-    }
-    env::var_os("WAYLAND_DISPLAY").is_some()
-}
-
-fn has_x11_session() -> bool {
-    if let Ok(value) = env::var("XDG_SESSION_TYPE") {
-        if value.eq_ignore_ascii_case("x11") {
-            return true;
-        }
-    }
-    env::var_os("DISPLAY").is_some()
-}
-
-fn run_command(program: &str, args: &[&str], help: &str) -> Result<(), OutputError> {
-    let status = Command::new(program).args(args).status().map_err(|err| {
+    let list_args = vec!["--list-types".to_string()];
+    let types = runner.output("wl-paste", &list_args).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
-            OutputError::new(format!("{program} not found; {help}"))
+            OutputError::new("wl-paste not found; install wl-clipboard")
         } else {
-            OutputError::new(format!("failed to run {program}: {err}"))
+            OutputError::new(format!("failed to run wl-paste: {err}"))
         }
     })?;
+    if !types.status.success() {
+        return Ok(None);
+    }
+    let mime_type = String::from_utf8_lossy(&types.stdout)
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if mime_type.is_empty() {
+        return Ok(None);
+    }
 
+    let read_args = vec!["--type".to_string(), mime_type.clone()];
+    let content = runner
+        .output("wl-paste", &read_args)
+        .map_err(|err| OutputError::new(format!("failed to read clipboard: {err}")))?;
+    if !content.status.success() {
+        return Ok(None);
+    }
+    if content.stdout.len() > MAX_CLIPBOARD_BYTES {
+        return Err(OutputError::new(format!(
+            "clipboard content too large to preserve: {} bytes",
+            content.stdout.len()
+        )));
+    }
+
+    Ok(Some(ClipboardSnapshot {
+        mime_type,
+        data: content.stdout,
+    }))
+}
+
+fn restore_clipboard_snapshot(
+    snapshot: Option<&ClipboardSnapshot>,
+    runner: &mut dyn CommandRunner,
+) -> Result<(), OutputError> {
+    match snapshot {
+        Some(snapshot) => {
+            let args = vec!["--type".to_string(), snapshot.mime_type.clone()];
+            let status = runner
+                .status_with_stdin("wl-copy", &args, &snapshot.data)
+                .map_err(|err| OutputError::new(format!("failed to restore clipboard: {err}")))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(OutputError::new(format!(
+                    "wl-copy restore exited with status {status}"
+                )))
+            }
+        }
+        None => {
+            let args = vec!["--clear".to_string()];
+            let status = runner
+                .status_with_stdin("wl-copy", &args, &[])
+                .map_err(|err| OutputError::new(format!("failed to clear clipboard: {err}")))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(OutputError::new(format!(
+                    "wl-copy clear exited with status {status}"
+                )))
+            }
+        }
+    }
+}
+
+fn copy_temporary_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputError> {
+    runner.copy_temporary_text(text)
+}
+
+fn copy_plain_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputError> {
+    let args = vec!["--type".to_string(), "text/plain".to_string()];
+    let status = runner
+        .status_with_stdin("wl-copy", &args, text.as_bytes())
+        .map_err(|err| OutputError::new(format!("failed to copy text: {err}")))?;
     if status.success() {
         Ok(())
     } else {
         Err(OutputError::new(format!(
-            "{program} exited with status {status}"
+            "wl-copy exited with status {status}"
         )))
+    }
+}
+
+fn type_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputError> {
+    let wtype_args = vec!["--".to_string(), text.to_string()];
+    if command_succeeds("wtype", &wtype_args, runner)? {
+        return Ok(());
+    }
+
+    Err(OutputError::new("wtype typing failed"))
+}
+
+fn send_paste_key(
+    config: &OutputConfig,
+    runner: &mut dyn CommandRunner,
+) -> Result<(), OutputError> {
+    let key = ParsedPasteKey::parse(&config.paste_keys)?;
+    send_paste_key_wtype(&key, runner)
+}
+
+fn send_paste_key_wtype(
+    key: &ParsedPasteKey,
+    runner: &mut dyn CommandRunner,
+) -> Result<(), OutputError> {
+    let args = key.to_wtype_args();
+    if command_succeeds("wtype", &args, runner)? {
+        Ok(())
+    } else {
+        Err(OutputError::new("wtype paste key failed"))
+    }
+}
+
+fn command_succeeds(
+    program: &str,
+    args: &[String],
+    runner: &mut dyn CommandRunner,
+) -> Result<bool, OutputError> {
+    match runner.output(program, args) {
+        Ok(output) => Ok(output.status.success()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(OutputError::new(format!("failed to run {program}: {err}"))),
+    }
+}
+
+impl ParsedPasteKey {
+    fn parse(value: &str) -> Result<Self, OutputError> {
+        let parts: Vec<&str> = value.split('+').map(str::trim).collect();
+        if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+            return Err(OutputError::new("paste_keys has invalid format"));
+        }
+
+        let key = KeyName::parse(parts[parts.len() - 1])?;
+        let modifiers = parts[..parts.len() - 1]
+            .iter()
+            .map(|part| KeyName::parse_modifier(part))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self { modifiers, key })
+    }
+
+    fn to_wtype_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for modifier in &self.modifiers {
+            args.push("-M".to_string());
+            args.push(modifier.wtype_name().to_string());
+        }
+        args.push("-k".to_string());
+        args.push(self.key.wtype_name().to_string());
+        for modifier in self.modifiers.iter().rev() {
+            args.push("-m".to_string());
+            args.push(modifier.wtype_name().to_string());
+        }
+        args
+    }
+}
+
+impl KeyName {
+    fn parse(value: &str) -> Result<Self, OutputError> {
+        match value.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" | "leftctrl" => Ok(Self::Ctrl),
+            "shift" | "leftshift" => Ok(Self::Shift),
+            "alt" | "leftalt" => Ok(Self::Alt),
+            "super" | "meta" | "win" | "leftmeta" => Ok(Self::Super),
+            "v" => Ok(Self::V),
+            "insert" | "ins" => Ok(Self::Insert),
+            "enter" | "return" => Ok(Self::Enter),
+            other => Err(OutputError::new(format!("unknown paste key: {other}"))),
+        }
+    }
+
+    fn parse_modifier(value: &str) -> Result<Self, OutputError> {
+        let key = Self::parse(value)?;
+        match key {
+            Self::Ctrl | Self::Shift | Self::Alt | Self::Super => Ok(key),
+            _ => Err(OutputError::new(format!(
+                "paste key modifier expected, got {value}"
+            ))),
+        }
+    }
+
+    fn wtype_name(self) -> &'static str {
+        match self {
+            Self::Ctrl => "ctrl",
+            Self::Shift => "shift",
+            Self::Alt => "alt",
+            Self::Super => "super",
+            Self::V => "v",
+            Self::Insert => "Insert",
+            Self::Enter => "Return",
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[derive(Debug, Clone)]
+    struct RecordedCommand {
+        program: String,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+    }
+
+    #[derive(Default)]
+    struct FakeRunner {
+        commands: Vec<RecordedCommand>,
+        outputs: Vec<Output>,
+        statuses: Vec<std::process::ExitStatus>,
+        sleeps: Vec<Duration>,
+    }
+
+    impl FakeRunner {
+        fn push_output(&mut self, stdout: &[u8]) {
+            self.outputs.push(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: stdout.to_vec(),
+                stderr: Vec::new(),
+            });
+        }
+
+        fn push_failed_output(&mut self, stderr: &[u8]) {
+            self.outputs.push(Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: Vec::new(),
+                stderr: stderr.to_vec(),
+            });
+        }
+
+        fn push_status_success(&mut self) {
+            self.statuses.push(std::process::ExitStatus::from_raw(0));
+        }
+    }
+
+    impl CommandRunner for FakeRunner {
+        fn output(&mut self, program: &str, args: &[String]) -> Result<Output, std::io::Error> {
+            self.commands.push(RecordedCommand {
+                program: program.to_string(),
+                args: args.to_vec(),
+                stdin: Vec::new(),
+            });
+            Ok(self.outputs.remove(0))
+        }
+
+        fn status_with_stdin(
+            &mut self,
+            program: &str,
+            args: &[String],
+            stdin: &[u8],
+        ) -> Result<std::process::ExitStatus, std::io::Error> {
+            self.commands.push(RecordedCommand {
+                program: program.to_string(),
+                args: args.to_vec(),
+                stdin: stdin.to_vec(),
+            });
+            Ok(self.statuses.remove(0))
+        }
+
+        fn copy_temporary_text(&mut self, text: &str) -> Result<(), OutputError> {
+            self.commands.push(RecordedCommand {
+                program: "temporary-clipboard-copy".to_string(),
+                args: vec!["text/plain".to_string(), KDE_SECRET_MIME.to_string()],
+                stdin: text.as_bytes().to_vec(),
+            });
+            Ok(())
+        }
+
+        fn sleep(&mut self, duration: Duration) {
+            self.sleeps.push(duration);
+        }
+    }
 
     struct EnvGuard {
         key: &'static str,
-        previous: Option<OsString>,
+        previous: Option<std::ffi::OsString>,
     }
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let previous = env::var_os(key);
             env::set_var(key, value);
-            Self { key, previous }
-        }
-
-        fn remove(key: &'static str) -> Self {
-            let previous = env::var_os(key);
-            env::remove_var(key);
             Self { key, previous }
         }
     }
@@ -385,22 +507,106 @@ mod tests {
     }
 
     #[test]
-    fn detects_wayland_session_from_env() {
-        let _guard = EnvGuard::set("XDG_SESSION_TYPE", "wayland");
-        assert!(has_wayland_session());
+    fn paste_mode_clears_clipboard_when_it_started_empty() {
+        let _guard = EnvGuard::set("WAYLAND_DISPLAY", "wayland-0");
+        let mut runner = FakeRunner::default();
+        runner.push_failed_output(b"nothing is copied");
+        runner.push_status_success();
+        runner.push_output(b"");
+        runner.push_status_success();
+
+        output_text_with_runner(
+            "new text",
+            OutputMode::Paste,
+            &OutputConfig::default(),
+            &mut runner,
+        )
+        .expect("paste should succeed");
+
+        let clear = runner.commands.last().expect("clear command");
+        assert_eq!(clear.program, "wl-copy");
+        assert_eq!(clear.args, ["--clear"]);
+        assert!(clear.stdin.is_empty());
     }
 
     #[test]
-    fn detects_x11_session_from_env() {
-        let _guard = EnvGuard::set("XDG_SESSION_TYPE", "x11");
-        assert!(has_x11_session());
+    fn paste_mode_rejects_invalid_paste_keys_before_changing_clipboard() {
+        let mut runner = FakeRunner::default();
+        let config = OutputConfig {
+            paste_keys: "ctrl+".to_string(),
+            ..OutputConfig::default()
+        };
+
+        let err = output_text_with_runner("new text", OutputMode::Paste, &config, &mut runner)
+            .expect_err("invalid paste key should fail");
+
+        assert!(err.to_string().contains("paste_keys has invalid format"));
+        assert!(
+            runner.commands.is_empty(),
+            "invalid config should not mutate clipboard"
+        );
     }
 
     #[test]
-    fn detects_wayland_session_from_display_fallback() {
-        let _guard = EnvGuard::remove("XDG_SESSION_TYPE");
-        let _wayland_guard = EnvGuard::set("WAYLAND_DISPLAY", "wayland-0");
-        let _display_guard = EnvGuard::remove("DISPLAY");
-        assert!(has_wayland_session());
+    fn paste_mode_restores_clipboard_after_paste_key_failure() {
+        let _guard = EnvGuard::set("WAYLAND_DISPLAY", "wayland-0");
+        let mut runner = FakeRunner::default();
+        runner.push_output(b"text/plain\n");
+        runner.push_output(b"old");
+        runner.push_status_success();
+        runner.push_failed_output(b"wtype unsupported");
+        runner.push_status_success();
+
+        let err = output_text_with_runner(
+            "new text",
+            OutputMode::Paste,
+            &OutputConfig::default(),
+            &mut runner,
+        )
+        .expect_err("paste key failure should be reported");
+
+        assert!(err.to_string().contains("wtype paste key failed"));
+        let restore = runner.commands.last().expect("restore command");
+        assert_eq!(restore.program, "wl-copy");
+        assert_eq!(restore.args, ["--type", "text/plain"]);
+        assert_eq!(restore.stdin, b"old");
+    }
+
+    #[test]
+    fn paste_mode_restores_original_clipboard_with_mime_type() {
+        let _guard = EnvGuard::set("WAYLAND_DISPLAY", "wayland-0");
+        let mut runner = FakeRunner::default();
+        runner.push_output(b"text/html\ntext/plain\n");
+        runner.push_output(b"<b>old</b>");
+        runner.push_status_success();
+        runner.push_output(b"");
+        runner.push_status_success();
+
+        output_text_with_runner(
+            "new text",
+            OutputMode::Paste,
+            &OutputConfig::default(),
+            &mut runner,
+        )
+        .expect("paste should succeed");
+
+        assert_eq!(runner.commands[0].program, "wl-paste");
+        assert_eq!(runner.commands[0].args, ["--list-types"]);
+        assert_eq!(runner.commands[1].args, ["--type", "text/html"]);
+        assert_eq!(runner.commands[2].program, "temporary-clipboard-copy");
+        assert_eq!(runner.commands[2].args, ["text/plain", KDE_SECRET_MIME]);
+        assert_eq!(runner.commands[2].stdin, b"new text");
+        assert_eq!(runner.commands[3].program, "wtype");
+        assert_eq!(
+            runner.commands[3].args,
+            ["-M", "ctrl", "-k", "v", "-m", "ctrl"]
+        );
+        assert_eq!(runner.commands[4].program, "wl-copy");
+        assert_eq!(runner.commands[4].args, ["--type", "text/html"]);
+        assert_eq!(runner.commands[4].stdin, b"<b>old</b>");
+        assert_eq!(
+            runner.sleeps,
+            [Duration::from_millis(100), Duration::from_millis(250)]
+        );
     }
 }

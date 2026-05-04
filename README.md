@@ -39,11 +39,13 @@ Bind the toggle command to a hotkey in your desktop environment for hands-free u
 
 ## Output Modes
 
-SoundVibes supports two output modes:
+SoundVibes supports explicit output modes:
 
 | Mode | Description | Use Case |
 |------|-------------|----------|
-| `inject` (default) | Types text directly into focused window | Dictation into any app |
+| `paste` (default) | Copies text with `wl-copy`, pastes with `wtype`, then restores the previous clipboard | KDE/Wayland dictation |
+| `clipboard` | Copies transcript to the clipboard for manual paste | Manual workflows |
+| `type` | Types text directly with `wtype` | Wayland compositors that support virtual keyboard |
 | `stdout` | Prints transcript to daemon's terminal | Scripting, debugging |
 
 **Important:** Transcripts appear in the **daemon's output**, not the toggle command's output.
@@ -101,35 +103,15 @@ This mode uses whisper.cpp's Silero VAD model (~2MB, auto-downloaded on first us
 systemctl --user enable --now sv.service
 ```
 
-**Text Injection Backends:**
+**Paste Output:**
 
-SoundVibes auto-detects the best backend, or you can force one with `--inject-backend`:
+Paste mode is the default. It uses `wl-copy`/`wl-paste` for clipboard capture and restore, and includes a KDE Klipper history-suppression MIME hint for the temporary transcription copy. The previous clipboard is restored after paste so dictated text does not remain in the active clipboard.
 
-| Backend | Works On | Notes |
-|---------|----------|-------|
-| `ydotool` | All (Wayland + X11) | Recommended for KDE Plasma |
-| `wtype` | Wayland (GNOME, Sway) | Doesn't work on KDE Plasma |
-| `xdotool` | X11 only | |
-
-**ydotool Setup (for KDE Plasma or universal use):**
+Configuration examples:
 
 ```bash
-# 1. Install ydotool
-sudo pacman -S ydotool              # Arch
-sudo apt install ydotool            # Debian/Ubuntu
-sudo dnf install ydotool            # Fedora
-
-# 2. Set up uinput permissions (required for non-root access)
-echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/80-uinput.rules
-sudo udevadm control --reload-rules
-sudo modprobe -r uinput && sudo modprobe uinput  # Reload module to apply permissions
-sudo udevadm trigger
-
-# 3. Add yourself to input group
-sudo usermod -aG input $USER
-
-# 4. Log out and log back in, then start ydotool
-systemctl --user enable --now ydotool.service
+sv daemon start --mode paste --paste-keys ctrl+v
+sv daemon start --mode paste --paste-keys ctrl+shift+v
 ```
 
 ## Requirements
@@ -137,7 +119,8 @@ systemctl --user enable --now ydotool.service
 - Linux x86_64
 - Microphone input device
 - Optional: Vulkan for GPU acceleration
-- Optional: `ydotool` (universal), `wtype` (Wayland), or `xdotool` (X11) for text injection
+- `wl-clipboard` (`wl-copy` and `wl-paste`) for paste/clipboard modes
+- `wtype` for automatic paste key simulation and direct type mode
 
 See the [website](https://soundvibes.teashaped.dev) for detailed requirements and configuration options.
 

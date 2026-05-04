@@ -9,7 +9,8 @@ use sv::audio;
 use sv::daemon;
 use sv::error::AppError;
 use sv::model::{model_language_for_transcription, ModelLanguage, ModelSize, ModelSpec};
-use sv::types::{AudioHost, InjectBackend, OutputFormat, OutputMode, VadMode, VadSetting};
+use sv::output::{OutputConfig, OutputMode};
+use sv::types::{AudioHost, OutputFormat, VadMode, VadSetting};
 
 #[derive(Parser, Debug)]
 #[command(name = "sv", version, about = "Offline speech-to-text CLI")]
@@ -38,11 +39,20 @@ struct Cli {
     #[arg(long, default_value = "plain", value_name = "MODE", global = true)]
     format: OutputFormat,
 
-    #[arg(long, default_value = "inject", value_name = "MODE", global = true)]
+    #[arg(long, default_value = "paste", value_name = "MODE", global = true)]
     mode: OutputMode,
 
-    #[arg(long, default_value = "auto", value_name = "BACKEND", global = true)]
-    inject_backend: InjectBackend,
+    #[arg(long, default_value = "ctrl+v", value_name = "KEYS", global = true)]
+    paste_keys: String,
+
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, global = true)]
+    restore_clipboard: bool,
+
+    #[arg(long, default_value_t = 100, value_name = "MS", global = true)]
+    pre_paste_delay_ms: u64,
+
+    #[arg(long, default_value_t = 250, value_name = "MS", global = true)]
+    restore_clipboard_delay_ms: u64,
 
     #[arg(long, default_value = "on", value_name = "MODE", global = true)]
     vad: VadMode,
@@ -102,6 +112,8 @@ enum CliCommand {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    #[command(name = "transcript-path")]
+    TranscriptPath,
 }
 
 #[derive(Subcommand, Debug, Copy, Clone, PartialEq, Eq)]
@@ -124,6 +136,7 @@ enum CliMode {
     Toggle,
     RunDaemon,
     StopDaemon,
+    ShowTranscriptPath,
     SetModel {
         size: ModelSize,
         model_language: ModelLanguage,
@@ -140,6 +153,7 @@ fn resolve_cli_mode(cli: &Cli) -> CliMode {
         Some(CliCommand::Daemon {
             command: DaemonCommand::Stop,
         }) => CliMode::StopDaemon,
+        Some(CliCommand::TranscriptPath) => CliMode::ShowTranscriptPath,
         Some(CliCommand::Daemon {
             command:
                 DaemonCommand::SetModel {
@@ -175,7 +189,7 @@ struct Config {
     sample_rate: u32,
     format: OutputFormat,
     mode: OutputMode,
-    inject_backend: InjectBackend,
+    output: OutputConfig,
     vad: VadMode,
     vad_silence_ms: u64,
     vad_threshold: f32,
@@ -243,18 +257,46 @@ impl Config {
             file.format.unwrap_or(cli.format)
         };
 
+        let output_file = file.output.unwrap_or_default();
         let mode = if matches.value_source("mode") == Some(ValueSource::CommandLine) {
             cli.mode
         } else {
-            file.mode.unwrap_or(cli.mode)
+            output_file.mode.unwrap_or(cli.mode)
         };
-
-        let inject_backend =
-            if matches.value_source("inject_backend") == Some(ValueSource::CommandLine) {
-                cli.inject_backend
+        let output = OutputConfig {
+            paste_keys: if matches.value_source("paste_keys") == Some(ValueSource::CommandLine) {
+                cli.paste_keys
             } else {
-                file.inject_backend.unwrap_or(cli.inject_backend)
-            };
+                output_file.paste_keys.unwrap_or(cli.paste_keys)
+            },
+            restore_clipboard: if matches.value_source("restore_clipboard")
+                == Some(ValueSource::CommandLine)
+            {
+                cli.restore_clipboard
+            } else {
+                output_file
+                    .restore_clipboard
+                    .unwrap_or(cli.restore_clipboard)
+            },
+            pre_paste_delay_ms: if matches.value_source("pre_paste_delay_ms")
+                == Some(ValueSource::CommandLine)
+            {
+                cli.pre_paste_delay_ms
+            } else {
+                output_file
+                    .pre_paste_delay_ms
+                    .unwrap_or(cli.pre_paste_delay_ms)
+            },
+            restore_clipboard_delay_ms: if matches.value_source("restore_clipboard_delay_ms")
+                == Some(ValueSource::CommandLine)
+            {
+                cli.restore_clipboard_delay_ms
+            } else {
+                output_file
+                    .restore_clipboard_delay_ms
+                    .unwrap_or(cli.restore_clipboard_delay_ms)
+            },
+        };
 
         let vad = if matches.value_source("vad") == Some(ValueSource::CommandLine) {
             cli.vad
@@ -319,7 +361,8 @@ impl Config {
             if matches.value_source("no_speech_timeout_ms") == Some(ValueSource::CommandLine) {
                 cli.no_speech_timeout_ms
             } else {
-                file.no_speech_timeout_ms.unwrap_or(cli.no_speech_timeout_ms)
+                file.no_speech_timeout_ms
+                    .unwrap_or(cli.no_speech_timeout_ms)
             };
 
         let download_model =
@@ -347,7 +390,7 @@ impl Config {
             sample_rate,
             format,
             mode,
-            inject_backend,
+            output,
             vad,
             vad_silence_ms,
             vad_threshold,
@@ -375,8 +418,7 @@ struct FileConfig {
     audio_host: Option<AudioHost>,
     sample_rate: Option<u32>,
     format: Option<OutputFormat>,
-    mode: Option<OutputMode>,
-    inject_backend: Option<InjectBackend>,
+    output: Option<FileOutputConfig>,
     vad: Option<VadSetting>,
     vad_silence_ms: Option<u64>,
     vad_threshold: Option<f32>,
@@ -387,6 +429,16 @@ struct FileConfig {
     dump_audio: Option<bool>,
     audio_feedback: Option<bool>,
     no_speech_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct FileOutputConfig {
+    mode: Option<OutputMode>,
+    paste_keys: Option<String>,
+    restore_clipboard: Option<bool>,
+    pre_paste_delay_ms: Option<u64>,
+    restore_clipboard_delay_ms: Option<u64>,
 }
 
 fn main() {
@@ -406,6 +458,10 @@ fn main() {
                 eprintln!("error: {err}");
                 process::exit(err.exit_code());
             }
+            return;
+        }
+        CliMode::ShowTranscriptPath => {
+            println!("{}", daemon::transcript_file_path().display());
             return;
         }
         CliMode::SetModel {
@@ -500,7 +556,7 @@ fn main() {
             sample_rate: config.sample_rate,
             format: config.format,
             mode: config.mode,
-            inject_backend: config.inject_backend,
+            output: config.output.clone(),
             vad: config.vad,
             vad_silence_ms: config.vad_silence_ms,
             vad_threshold: config.vad_threshold,
@@ -576,9 +632,15 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
 
     let confirm_samples = (0.1 * config.sample_rate as f32) as usize; // 100ms
 
-    println!("Testing audio levels. Threshold: {:.4}", config.vad_threshold);
+    println!(
+        "Testing audio levels. Threshold: {:.4}",
+        config.vad_threshold
+    );
     println!("Speak to see if speech is detected. Press Ctrl+C to stop.\n");
-    println!("{:>10} {:>10} {:>12} {:>8}", "RMS", "Threshold", "Accumulated", "Status");
+    println!(
+        "{:>10} {:>10} {:>12} {:>8}",
+        "RMS", "Threshold", "Accumulated", "Status"
+    );
     println!("{:-<10} {:-<10} {:-<12} {:-<8}", "", "", "", "");
 
     let mut buffer = Vec::new();
@@ -759,5 +821,54 @@ mod tests {
                 model_language: ModelLanguage::En,
             }
         );
+    }
+
+    #[test]
+    fn parses_transcript_path_subcommand() {
+        let cli = Cli::try_parse_from(["sv", "transcript-path"]).expect("failed to parse cli");
+        assert_eq!(resolve_cli_mode(&cli), CliMode::ShowTranscriptPath);
+    }
+
+    #[test]
+    fn defaults_to_paste_mode_with_clipboard_restore() {
+        let command = Cli::command();
+        let matches = command
+            .try_get_matches_from(["sv", "daemon", "start"])
+            .expect("failed to parse cli");
+        let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
+        let config = Config::from_sources(cli, &matches, FileConfig::default());
+
+        assert_eq!(config.mode, OutputMode::Paste);
+        assert!(config.output.restore_clipboard);
+        assert_eq!(config.output.paste_keys, "ctrl+v");
+        assert_eq!(config.output.pre_paste_delay_ms, 100);
+        assert_eq!(config.output.restore_clipboard_delay_ms, 250);
+    }
+
+    #[test]
+    fn reads_paste_output_config_from_output_table() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [output]
+            mode = "clipboard"
+            paste_keys = "ctrl+shift+v"
+            restore_clipboard = false
+            pre_paste_delay_ms = 150
+            restore_clipboard_delay_ms = 400
+            "#,
+        )
+        .expect("config should parse");
+        let command = Cli::command();
+        let matches = command
+            .try_get_matches_from(["sv", "daemon", "start"])
+            .expect("failed to parse cli");
+        let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
+        let config = Config::from_sources(cli, &matches, file);
+
+        assert_eq!(config.mode, OutputMode::Clipboard);
+        assert_eq!(config.output.paste_keys, "ctrl+shift+v");
+        assert!(!config.output.restore_clipboard);
+        assert_eq!(config.output.pre_paste_delay_ms, 150);
+        assert_eq!(config.output.restore_clipboard_delay_ms, 400);
     }
 }

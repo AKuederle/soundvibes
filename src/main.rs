@@ -996,4 +996,36 @@ mod tests {
         assert_eq!(config.output.pre_paste_delay_ms, 150);
         assert_eq!(config.output.restore_clipboard_delay_ms, 400);
     }
+
+    #[test]
+    fn reads_segment_config_with_cli_overrides() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            segment_target_ms = 9000
+            segment_grace_ms = 1500
+            segment_overlap_ms = 300
+            segment_min_ms = 900
+            "#,
+        )
+        .expect("config should parse");
+        let command = Cli::command();
+        let matches = command
+            .try_get_matches_from([
+                "sv",
+                "daemon",
+                "start",
+                "--segment-target-ms",
+                "7000",
+                "--segment-overlap-ms",
+                "250",
+            ])
+            .expect("failed to parse cli");
+        let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
+        let config = Config::from_sources(cli, &matches, file);
+
+        assert_eq!(config.segment_target_ms, 7000);
+        assert_eq!(config.segment_grace_ms, 1500);
+        assert_eq!(config.segment_overlap_ms, 250);
+        assert_eq!(config.segment_min_ms, 900);
+    }
 }

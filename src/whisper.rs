@@ -138,6 +138,8 @@ pub struct WhisperContext {
     ctx: NonNull<whisper_context>,
 }
 
+unsafe impl Send for WhisperContext {}
+
 impl WhisperContext {
     pub fn from_file(path: &Path) -> Result<Self, WhisperError> {
         let path_c =

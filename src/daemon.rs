@@ -76,7 +76,7 @@ pub trait AudioBackend {
     ) -> Result<Box<dyn CaptureSource>, audio::AudioError>;
 }
 
-pub trait Transcriber {
+pub trait Transcriber: Send {
     fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String, AppError>;
 }
 

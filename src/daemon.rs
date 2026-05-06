@@ -327,7 +327,6 @@ pub fn run_daemon_loop(
                     &mut pending_jobs,
                     &mut last_emitted_transcript,
                 );
-                worker.shutdown()?;
                 let spec = ModelSpec::new(size, model_language);
                 match model::prepare_model(None, &spec, config.download_model) {
                     Ok(prepared) => {
@@ -337,7 +336,11 @@ pub fn run_daemon_loop(
                         let new_path = prepared.path.clone();
                         match deps.transcriber_factory.load(Some(&new_path)) {
                             Ok(new_transcriber) => {
-                                worker = TranscriptionWorker::start(new_transcriber);
+                                let mut old_worker = std::mem::replace(
+                                    &mut worker,
+                                    TranscriptionWorker::start(new_transcriber),
+                                );
+                                old_worker.shutdown()?;
                                 output.stdout(&format!(
                                     "Model reloaded: size={}, model-language={}",
                                     model_size_token(size),
@@ -1239,8 +1242,10 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
@@ -1449,6 +1454,85 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn failed_model_reload_keeps_existing_worker() -> Result<(), AppError> {
+        let data_home = temp_data_home();
+        let _data_guard = EnvGuard::set("XDG_DATA_HOME", &data_home);
+        let model_path = data_home
+            .join("soundvibes")
+            .join("models")
+            .join("ggml-small.en.bin");
+        fs::create_dir_all(model_path.parent().expect("model parent")).expect("create model dir");
+        fs::write(&model_path, b"test model").expect("write model file");
+
+        let (sender, receiver) = control_channel();
+        let control_sender = sender.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut output = TestOutput::default();
+        let deps = DaemonDeps {
+            audio: Box::new(TestAudioBackend::new(
+                vec!["Mic".to_string()],
+                vec![vec![0.2; 160]],
+            )),
+            transcriber_factory: Box::new(ReloadFailFactory {
+                responses: Arc::new(Mutex::new(vec![Ok("after failure".to_string())].into())),
+                load_count: Arc::new(AtomicUsize::new(0)),
+            }),
+        };
+        let config = DaemonConfig {
+            model_path: None,
+            download_model: false,
+            language: "en".to_string(),
+            device: None,
+            audio_host: AudioHost::Default,
+            sample_rate: 16_000,
+            format: OutputFormat::Plain,
+            mode: OutputMode::Stdout,
+            output: OutputConfig::default(),
+            vad: VadMode::Off,
+            vad_silence_ms: 800,
+            vad_threshold: 0.015,
+            vad_chunk_ms: 250,
+            segment_target_ms: DEFAULT_SEGMENT_TARGET_MS,
+            segment_grace_ms: DEFAULT_SEGMENT_GRACE_MS,
+            segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
+            segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
+            debug_audio: false,
+            debug_vad: false,
+            dump_audio: false,
+            audio_feedback: false,
+            no_speech_timeout_ms: 0,
+            hotkey: HotkeyConfig::default(),
+        };
+
+        let shutdown_trigger = Arc::clone(&shutdown);
+        let control_thread = thread::spawn(move || {
+            let _ = control_sender.send(ControlEvent::SetModel {
+                size: ModelSize::Small,
+                model_language: ModelLanguage::En,
+            });
+            thread::sleep(Duration::from_millis(50));
+            let _ = control_sender.send(ControlEvent::StartRecording);
+            let _ = control_sender.send(ControlEvent::StopRecording);
+            thread::sleep(Duration::from_millis(50));
+            shutdown_trigger.store(true, Ordering::Relaxed);
+        });
+
+        let result = run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown);
+        control_thread.join().expect("control thread failed");
+        result?;
+
+        assert!(output
+            .stderr_lines()
+            .iter()
+            .any(|line| line.contains("Model reload failed")));
+        assert!(output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("Transcript 1: after failure")));
+        Ok(())
+    }
+
     struct SignalOutput {
         stdout: Vec<String>,
         stderr: Vec<String>,
@@ -1466,6 +1550,76 @@ mod tests {
         fn stderr(&mut self, message: &str) {
             self.stderr.push(message.to_string());
         }
+    }
+
+    struct ReloadFailFactory {
+        responses: Arc<Mutex<VecDeque<Result<String, AppError>>>>,
+        load_count: Arc<AtomicUsize>,
+    }
+
+    impl TranscriberFactory for ReloadFailFactory {
+        fn load(&self, _model_path: Option<&Path>) -> Result<Box<dyn Transcriber>, AppError> {
+            let load_number = self.load_count.fetch_add(1, AtomicOrdering::SeqCst);
+            if load_number == 1 {
+                return Err(AppError::runtime("planned reload failure"));
+            }
+            Ok(Box::new(ReloadFailTranscriber {
+                responses: Arc::clone(&self.responses),
+            }))
+        }
+    }
+
+    struct ReloadFailTranscriber {
+        responses: Arc<Mutex<VecDeque<Result<String, AppError>>>>,
+    }
+
+    impl Transcriber for ReloadFailTranscriber {
+        fn transcribe(
+            &self,
+            _samples: &[f32],
+            _language: Option<&str>,
+        ) -> Result<String, AppError> {
+            self.responses
+                .lock()
+                .expect("responses lock")
+                .pop_front()
+                .unwrap_or_else(|| Ok(String::new()))
+        }
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = env::var_os(key);
+            env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => env::set_var(self.key, value),
+                None => env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn temp_data_home() -> PathBuf {
+        let mut dir = env::temp_dir();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        dir.push(format!(
+            "soundvibes-daemon-test-{}-{stamp}",
+            std::process::id()
+        ));
+        dir
     }
 
     #[test]

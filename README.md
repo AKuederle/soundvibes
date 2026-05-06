@@ -86,6 +86,11 @@ This mode uses whisper.cpp's Silero VAD model (~2MB, auto-downloaded on first us
 - `--vad continuous` - Enable continuous transcription mode
 - `--vad-silence-ms` - Silence duration to trigger transcription (default: 800ms)
 
+**Model Selection:**
+- `--model-size tiny|base|small|medium|large|large-v3-turbo` selects the whisper.cpp model family.
+- `--model-language en` selects English-only variants where available.
+- `large-v3-turbo` is multilingual-only; use it with `--model-language auto`.
+
 **Use cases:**
 - Long-form dictation where you want text as you speak
 - Hands-free note-taking with natural pauses

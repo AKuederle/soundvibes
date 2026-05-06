@@ -231,7 +231,9 @@ impl Config {
             } else {
                 (cli.model_language, false)
             };
-        let model_language = if model_language_explicit {
+        let model_language = if model_size == ModelSize::LargeV3Turbo && !model_language_explicit {
+            ModelLanguage::Auto
+        } else if model_language_explicit {
             model_language
         } else {
             model_language_for_transcription(&language)
@@ -841,6 +843,40 @@ mod tests {
                 model_language: ModelLanguage::En,
             }
         );
+    }
+
+    #[test]
+    fn parses_large_v3_turbo_model_size() {
+        let cli = Cli::try_parse_from([
+            "sv",
+            "daemon",
+            "set-model",
+            "--size",
+            "large-v3-turbo",
+            "--model-language",
+            "auto",
+        ])
+        .expect("failed to parse cli");
+        assert_eq!(
+            resolve_cli_mode(&cli),
+            CliMode::SetModel {
+                size: ModelSize::LargeV3Turbo,
+                model_language: ModelLanguage::Auto,
+            }
+        );
+    }
+
+    #[test]
+    fn large_v3_turbo_defaults_to_multilingual_model() {
+        let command = Cli::command();
+        let matches = command
+            .try_get_matches_from(["sv", "daemon", "start", "--model-size", "large-v3-turbo"])
+            .expect("failed to parse cli");
+        let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
+        let config = Config::from_sources(cli, &matches, FileConfig::default());
+
+        assert_eq!(config.model_size, ModelSize::LargeV3Turbo);
+        assert_eq!(config.model_language, ModelLanguage::Auto);
     }
 
     #[test]

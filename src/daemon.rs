@@ -733,7 +733,7 @@ fn parse_set_model_command(command: &str) -> Result<(ModelSize, ModelLanguage), 
     for token in command.split_whitespace().skip(1) {
         if let Some(value) = token.strip_prefix("size=") {
             size = Some(parse_model_size(value).ok_or_else(|| {
-                format!("invalid model size '{value}' (expected auto|tiny|base|small|medium|large)")
+                format!("invalid model size '{value}' (expected auto|tiny|base|small|medium|large|large-v3-turbo)")
             })?);
         } else if let Some(value) = token.strip_prefix("model-language=") {
             model_language =
@@ -757,6 +757,7 @@ fn parse_model_size(value: &str) -> Option<ModelSize> {
         "small" => Some(ModelSize::Small),
         "medium" => Some(ModelSize::Medium),
         "large" => Some(ModelSize::Large),
+        "large-v3-turbo" => Some(ModelSize::LargeV3Turbo),
         _ => None,
     }
 }
@@ -822,6 +823,7 @@ fn model_size_token(size: ModelSize) -> &'static str {
         ModelSize::Small => "small",
         ModelSize::Medium => "medium",
         ModelSize::Large => "large",
+        ModelSize::LargeV3Turbo => "large-v3-turbo",
     }
 }
 

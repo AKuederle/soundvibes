@@ -24,6 +24,9 @@ pub enum ModelSize {
     Small,
     Medium,
     Large,
+    #[serde(rename = "large-v3-turbo")]
+    #[value(name = "large-v3-turbo")]
+    LargeV3Turbo,
 }
 
 impl ModelSize {
@@ -42,6 +45,7 @@ impl ModelSize {
             ModelSize::Small => "small",
             ModelSize::Medium => "medium",
             ModelSize::Large => "large",
+            ModelSize::LargeV3Turbo => "large-v3-turbo",
         }
     }
 }
@@ -74,12 +78,22 @@ impl ModelSpec {
         Self { size, language }
     }
 
-    pub fn filename(&self) -> String {
+    pub fn filename_result(&self) -> Result<String, AppError> {
         let size = self.size.resolved().as_str();
         match self.language {
-            ModelLanguage::Auto => format!("ggml-{size}.bin"),
-            ModelLanguage::En => format!("ggml-{size}.en.bin"),
+            ModelLanguage::Auto => Ok(format!("ggml-{size}.bin")),
+            ModelLanguage::En if self.size.resolved() == ModelSize::LargeV3Turbo => {
+                Err(AppError::config(
+                    "large-v3-turbo.en is not available; use model_language = \"auto\"",
+                ))
+            }
+            ModelLanguage::En => Ok(format!("ggml-{size}.en.bin")),
         }
+    }
+
+    pub fn filename(&self) -> String {
+        self.filename_result()
+            .expect("invalid model spec for filename")
     }
 }
 
@@ -94,9 +108,19 @@ pub fn prepare_model(
     spec: &ModelSpec,
     allow_download: bool,
 ) -> Result<PreparedModel, AppError> {
-    let path = resolve_model_path(explicit_path, spec);
+    let path = resolve_model_path_result(explicit_path, spec)?;
     let downloaded = ensure_model_available(&path, spec, allow_download)?;
     Ok(PreparedModel { path, downloaded })
+}
+
+pub fn resolve_model_path_result(
+    explicit_path: Option<&Path>,
+    spec: &ModelSpec,
+) -> Result<PathBuf, AppError> {
+    match explicit_path {
+        Some(path) => Ok(path.to_path_buf()),
+        None => Ok(default_model_dir().join(spec.filename_result()?)),
+    }
 }
 
 pub fn resolve_model_path(explicit_path: Option<&Path>, spec: &ModelSpec) -> PathBuf {
@@ -152,7 +176,7 @@ fn validate_model_path(path: &Path) -> Result<(), AppError> {
 }
 
 fn download_model(path: &Path, spec: &ModelSpec) -> Result<(), AppError> {
-    let filename = spec.filename();
+    let filename = spec.filename_result()?;
     let base = env::var("SV_MODEL_BASE_URL").unwrap_or_else(|_| DEFAULT_MODEL_BASE_URL.to_string());
     let url = format!("{}/{}", base.trim_end_matches('/'), filename);
 
@@ -254,4 +278,27 @@ fn download_vad_model(path: &Path) -> Result<(), AppError> {
         ))
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_v3_turbo_uses_whisper_cpp_turbo_filename() {
+        let spec = ModelSpec::new(ModelSize::LargeV3Turbo, ModelLanguage::Auto);
+
+        assert_eq!(spec.filename(), "ggml-large-v3-turbo.bin");
+    }
+
+    #[test]
+    fn large_v3_turbo_rejects_english_only_variant() {
+        let spec = ModelSpec::new(ModelSize::LargeV3Turbo, ModelLanguage::En);
+
+        let err = spec
+            .filename_result()
+            .expect_err("turbo has no English-only model");
+
+        assert!(err.to_string().contains("large-v3-turbo.en"));
+    }
 }

@@ -121,9 +121,14 @@ fn at01b_language_selects_model_variant() -> Result<(), Box<dyn Error>> {
 
     let english_spec = sv::model::ModelSpec::new(sv::model::ModelSize::Small, english);
     let auto_spec = sv::model::ModelSpec::new(sv::model::ModelSize::Small, auto);
+    let turbo_spec = sv::model::ModelSpec::new(
+        sv::model::ModelSize::LargeV3Turbo,
+        sv::model::ModelLanguage::Auto,
+    );
 
     assert!(english_spec.filename().contains(".en."));
     assert!(!auto_spec.filename().contains(".en."));
+    assert_eq!(turbo_spec.filename(), "ggml-large-v3-turbo.bin");
     Ok(())
 }
 

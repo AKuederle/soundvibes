@@ -72,7 +72,7 @@ This document describes the technical design for the `sv` CLI that performs offl
 
 ### Model Download
 - On `sv`/`sv daemon start` startup, check for the configured model in the default data directory.
-- Download the ggml model if missing, based on `model_language` and `model_size` config (defaults to small + general).
+- Download the ggml model if missing, based on `model_language` and `model_size` config (defaults to small + general). `large-v3-turbo` is supported as a multilingual-only model size.
 - If `model_path` is provided, download or resolve the model there instead of the default location.
 
 ### GPU Backend Selection

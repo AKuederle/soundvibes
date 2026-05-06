@@ -34,8 +34,8 @@ These tests validate the product behavior for the offline Linux CLI.
 ### AT-01b: Language selects model variant
 - Setup: set `language = "en"` without `model_language`.
 - Command: `sv daemon start`
-- Expect: model download uses the `.en` variant.
-- Pass: model file path resolves to `ggml-<size>.en.bin` when language is `en` and `model_language` is unset.
+- Expect: model download uses the `.en` variant when available.
+- Pass: model file path resolves to `ggml-<size>.en.bin` when language is `en` and `model_language` is unset; `large-v3-turbo` resolves to `ggml-large-v3-turbo.bin`.
 
 ### AT-02: Missing model returns error
 - Setup: set `model` in config to `${XDG_DATA_HOME:-~/.local/share}/soundvibes/models/missing.bin` and set `download_model = false`.

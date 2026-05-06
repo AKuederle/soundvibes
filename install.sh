@@ -384,7 +384,7 @@ create_config() {
 # Documentation: https://github.com/kejne/soundvibes#configuration
 
 # Model settings
-model_size = "small"        # Options: tiny, base, small, medium, large, auto
+model_size = "small"        # Options: tiny, base, small, medium, large, large-v3-turbo, auto
 model_language = "auto"     # Options: auto, en
 download_model = true       # Auto-download missing models
 

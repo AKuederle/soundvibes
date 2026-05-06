@@ -80,8 +80,8 @@ pub fn carry_after_cut(
 }
 
 pub fn dedupe_boundary(previous: &str, current: &str) -> String {
-    let previous_words = previous.split_whitespace().collect::<Vec<_>>();
-    let current_words = current.split_whitespace().collect::<Vec<_>>();
+    let previous_words = normalized_word_spans(previous);
+    let current_words = normalized_word_spans(current);
     let max_overlap = previous_words.len().min(current_words.len());
 
     for overlap in (1..=max_overlap).rev() {
@@ -90,13 +90,91 @@ pub fn dedupe_boundary(previous: &str, current: &str) -> String {
         if previous_suffix
             .iter()
             .zip(current_prefix.iter())
-            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+            .all(|(left, right)| left.normalized == right.normalized)
         {
-            return current_words[overlap..].join(" ");
+            return if overlap == current_words.len() {
+                String::new()
+            } else {
+                current[current_words[overlap].start..]
+                    .trim_start()
+                    .to_string()
+            };
         }
     }
 
     current.to_string()
+}
+
+pub fn append_segment_space(text: &str) -> String {
+    if text.is_empty() || text.ends_with(char::is_whitespace) {
+        text.to_string()
+    } else {
+        format!("{text} ")
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NormalizedWord {
+    normalized: String,
+    start: usize,
+}
+
+fn normalized_word_spans(value: &str) -> Vec<NormalizedWord> {
+    let mut words = Vec::new();
+    let mut start = None;
+
+    for (index, character) in value.char_indices() {
+        if character.is_whitespace() {
+            if let Some(word_start) = start.take() {
+                push_normalized_word(value, word_start, index, &mut words);
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+
+    if let Some(word_start) = start {
+        push_normalized_word(value, word_start, value.len(), &mut words);
+    }
+
+    words
+}
+
+fn push_normalized_word(value: &str, start: usize, end: usize, words: &mut Vec<NormalizedWord>) {
+    let normalized = value[start..end]
+        .trim_matches(is_boundary_punctuation)
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if !normalized.is_empty() {
+        words.push(NormalizedWord { normalized, start });
+    }
+}
+
+fn is_boundary_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '.' | ','
+            | ';'
+            | ':'
+            | '!'
+            | '?'
+            | '"'
+            | '\''
+            | '`'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '<'
+            | '>'
+            | '“'
+            | '”'
+            | '‘'
+            | '’'
+    )
 }
 
 #[cfg(test)]
@@ -189,5 +267,40 @@ mod tests {
             dedupe_boundary("first segment", "second segment"),
             "second segment"
         );
+    }
+
+    #[test]
+    fn removes_duplicate_words_with_normalized_punctuation() {
+        assert_eq!(dedupe_boundary("Hello, world.", "WORLD again"), "again");
+        assert_eq!(dedupe_boundary("this is a test", "is a test, now"), "now");
+        assert_eq!(
+            dedupe_boundary("I went home", "home, and slept"),
+            "and slept"
+        );
+        assert_eq!(dedupe_boundary("end.", "end,"), "");
+    }
+
+    #[test]
+    fn keeps_meaningful_internal_punctuation_when_matching_words() {
+        assert_eq!(
+            dedupe_boundary("it went well", "we'll continue"),
+            "we'll continue"
+        );
+        assert_eq!(
+            dedupe_boundary("use shell", "she'll respond"),
+            "she'll respond"
+        );
+    }
+
+    #[test]
+    fn keeps_symbol_suffixes_when_matching_words() {
+        assert_eq!(dedupe_boundary("use C", "C++ here"), "C++ here");
+        assert_eq!(dedupe_boundary("use C", "C# here"), "C# here");
+    }
+
+    #[test]
+    fn appends_one_space_after_segment_text() {
+        assert_eq!(append_segment_space("hello"), "hello ");
+        assert_eq!(append_segment_space("hello "), "hello ");
     }
 }

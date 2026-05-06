@@ -210,6 +210,7 @@ pub fn run_daemon_loop(
     let mut pending_results = BTreeMap::new();
     let mut last_emitted_transcript = String::new();
     let mut capture: Option<Box<dyn CaptureSource>> = None;
+    let mut buffer_has_leading_overlap = false;
     // For continuous mode: track silence at end of buffer
     let mut trailing_silence_samples: usize = 0;
     // For no-speech timeout: track when recording started and sustained speech
@@ -241,6 +242,7 @@ pub fn run_daemon_loop(
                     &vad,
                     &mut capture,
                     &mut buffer,
+                    buffer_has_leading_overlap,
                     &mut next_job_index,
                     &mut pending_jobs,
                     output,
@@ -275,6 +277,7 @@ pub fn run_daemon_loop(
                         &mut speech_samples,
                         output,
                     )?;
+                    buffer_has_leading_overlap = false;
                 }
             }
             Ok(ControlEvent::StopRecording) => {
@@ -286,10 +289,12 @@ pub fn run_daemon_loop(
                         &mut recording,
                         &mut capture,
                         &mut buffer,
+                        buffer_has_leading_overlap,
                         &mut next_job_index,
                         &mut pending_jobs,
                         output,
                     )?;
+                    buffer_has_leading_overlap = false;
                     wait_for_pending_results(
                         &worker,
                         config,
@@ -316,6 +321,7 @@ pub fn run_daemon_loop(
                     recording = false;
                     buffer.clear();
                     capture = None;
+                    buffer_has_leading_overlap = false;
                     output.stdout("Recording stopped for model reload.");
                 }
                 wait_for_pending_results(
@@ -411,7 +417,7 @@ pub fn run_daemon_loop(
                                 &worker,
                                 config,
                                 &buffer[..speech_end],
-                                reason != CutReason::Silence,
+                                buffer_has_leading_overlap,
                                 &mut next_job_index,
                                 &mut pending_jobs,
                                 output,
@@ -422,6 +428,13 @@ pub fn run_daemon_loop(
                                 &segment_config,
                                 reason,
                             );
+                            buffer_has_leading_overlap = reason != CutReason::Silence
+                                && carried_overlap_contains_speech(
+                                    &buffer,
+                                    segment_config.sample_rate,
+                                    segment_config.vad_threshold,
+                                    config.vad_chunk_ms,
+                                );
                             trailing_silence_samples = 0;
                             speech_detected = false;
                             speech_samples = 0;
@@ -440,6 +453,7 @@ pub fn run_daemon_loop(
                     recording = false;
                     buffer.clear();
                     capture = None;
+                    buffer_has_leading_overlap = false;
                     recording_started = None;
                     output.stdout("No speech detected, cancelled.");
                     if config.audio_feedback {
@@ -459,6 +473,7 @@ fn stop_recording(
     vad: &audio::VadConfig,
     capture: &mut Option<Box<dyn CaptureSource>>,
     buffer: &mut Vec<f32>,
+    buffer_has_leading_overlap: bool,
     next_job_index: &mut u64,
     pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
@@ -472,6 +487,7 @@ fn stop_recording(
         config,
         vad,
         buffer,
+        buffer_has_leading_overlap,
         next_job_index,
         pending_jobs,
         output,
@@ -524,6 +540,7 @@ fn stop_active_recording(
     recording: &mut bool,
     capture: &mut Option<Box<dyn CaptureSource>>,
     buffer: &mut Vec<f32>,
+    buffer_has_leading_overlap: bool,
     next_job_index: &mut u64,
     pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
@@ -535,17 +552,20 @@ fn stop_active_recording(
         vad,
         capture,
         buffer,
+        buffer_has_leading_overlap,
         next_job_index,
         pending_jobs,
         output,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn submit_final_recording(
     worker: &TranscriptionWorker,
     config: &DaemonConfig,
     vad: &audio::VadConfig,
     buffer: &[f32],
+    had_overlap: bool,
     next_job_index: &mut u64,
     pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
@@ -558,7 +578,7 @@ fn submit_final_recording(
         worker,
         config,
         &trimmed,
-        false,
+        had_overlap,
         next_job_index,
         pending_jobs,
         output,
@@ -709,6 +729,21 @@ fn samples_from_ms(ms: u64, sample_rate: u32) -> usize {
     ((ms as f64 / 1000.0) * sample_rate as f64).round() as usize
 }
 
+fn carried_overlap_contains_speech(
+    samples: &[f32],
+    sample_rate: u32,
+    vad_threshold: f32,
+    vad_chunk_ms: u64,
+) -> bool {
+    if samples.is_empty() {
+        return false;
+    }
+    let chunk_samples = samples_from_ms(vad_chunk_ms, sample_rate).max(1);
+    samples
+        .chunks(chunk_samples)
+        .any(|chunk| audio::rms_energy(chunk) >= vad_threshold)
+}
+
 fn emit_transcript(
     config: &DaemonConfig,
     output: &mut dyn DaemonOutput,
@@ -717,8 +752,17 @@ fn emit_transcript(
 ) -> Result<(), String> {
     match config.mode {
         OutputMode::Stdout => emit_stdout(config.format, output, text, info),
-        mode => {
-            if let Err(err) = output::output_text(text, mode, &config.output) {
+        OutputMode::Clipboard => {
+            if let Err(err) = output::output_text(text, OutputMode::Clipboard, &config.output) {
+                output.stderr(&format!("warn: {err}; falling back to stdout"));
+                emit_stdout(config.format, output, text, info)
+            } else {
+                Ok(())
+            }
+        }
+        mode @ (OutputMode::Paste | OutputMode::Type) => {
+            let insertion_text = segmentation::append_segment_space(text);
+            if let Err(err) = output::output_text(&insertion_text, mode, &config.output) {
                 output.stderr(&format!("warn: {err}; falling back to stdout"));
                 emit_stdout(config.format, output, text, info)
             } else {
@@ -1452,6 +1496,152 @@ mod tests {
             "expected timed continuous segmentation before key release"
         );
         Ok(())
+    }
+
+    #[test]
+    fn carried_speech_overlap_is_deduped_on_following_silence_segment() -> Result<(), AppError> {
+        let (sender, receiver) = control_channel();
+        let control_sender = sender.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut output = TestOutput::default();
+        let deps = DaemonDeps {
+            audio: Box::new(TestAudioBackend::new(
+                vec!["Mic".to_string()],
+                vec![vec![0.2; 20], vec![0.0; 5], vec![0.2; 20], vec![0.0; 20]],
+            )),
+            transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
+                "hello world".to_string(),
+                "world again".to_string(),
+            ])),
+        };
+        let config = DaemonConfig {
+            model_path: None,
+            download_model: false,
+            language: "en".to_string(),
+            device: None,
+            audio_host: AudioHost::Default,
+            sample_rate: 1_000,
+            format: OutputFormat::Plain,
+            mode: OutputMode::Stdout,
+            output: OutputConfig::default(),
+            vad: VadMode::Continuous,
+            vad_silence_ms: 20,
+            vad_threshold: 0.015,
+            vad_chunk_ms: 20,
+            segment_target_ms: 20,
+            segment_grace_ms: 200,
+            segment_overlap_ms: 10,
+            segment_min_ms: 10,
+            debug_audio: false,
+            debug_vad: false,
+            dump_audio: false,
+            audio_feedback: false,
+            no_speech_timeout_ms: 0,
+            hotkey: HotkeyConfig::default(),
+        };
+
+        let shutdown_trigger = Arc::clone(&shutdown);
+        let control_thread = thread::spawn(move || {
+            let _ = control_sender.send(ControlEvent::StartRecording);
+            thread::sleep(Duration::from_millis(200));
+            let _ = control_sender.send(ControlEvent::StopRecording);
+            thread::sleep(Duration::from_millis(50));
+            shutdown_trigger.store(true, Ordering::Relaxed);
+        });
+
+        let result = run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown);
+        control_thread.join().expect("control thread failed");
+        result?;
+
+        assert!(output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("Transcript 1: hello world")));
+        assert!(output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("Transcript 2: again")));
+        assert!(!output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("Transcript 2: world again")));
+        Ok(())
+    }
+
+    #[test]
+    fn carried_silence_overlap_does_not_dedupe_following_segment() -> Result<(), AppError> {
+        let (sender, receiver) = control_channel();
+        let control_sender = sender.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut output = TestOutput::default();
+        let deps = DaemonDeps {
+            audio: Box::new(TestAudioBackend::new(
+                vec!["Mic".to_string()],
+                vec![vec![0.2; 20], vec![0.0; 5], vec![0.2; 20], vec![0.0; 20]],
+            )),
+            transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
+                "hello world".to_string(),
+                "world again".to_string(),
+            ])),
+        };
+        let config = DaemonConfig {
+            model_path: None,
+            download_model: false,
+            language: "en".to_string(),
+            device: None,
+            audio_host: AudioHost::Default,
+            sample_rate: 1_000,
+            format: OutputFormat::Plain,
+            mode: OutputMode::Stdout,
+            output: OutputConfig::default(),
+            vad: VadMode::Continuous,
+            vad_silence_ms: 20,
+            vad_threshold: 0.015,
+            vad_chunk_ms: 20,
+            segment_target_ms: 20,
+            segment_grace_ms: 200,
+            segment_overlap_ms: 5,
+            segment_min_ms: 10,
+            debug_audio: false,
+            debug_vad: false,
+            dump_audio: false,
+            audio_feedback: false,
+            no_speech_timeout_ms: 0,
+            hotkey: HotkeyConfig::default(),
+        };
+
+        let shutdown_trigger = Arc::clone(&shutdown);
+        let control_thread = thread::spawn(move || {
+            let _ = control_sender.send(ControlEvent::StartRecording);
+            thread::sleep(Duration::from_millis(200));
+            let _ = control_sender.send(ControlEvent::StopRecording);
+            thread::sleep(Duration::from_millis(50));
+            shutdown_trigger.store(true, Ordering::Relaxed);
+        });
+
+        let result = run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown);
+        control_thread.join().expect("control thread failed");
+        result?;
+
+        assert!(output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("Transcript 2: world again")));
+        Ok(())
+    }
+
+    #[test]
+    fn carried_overlap_speech_detection_uses_chunks() {
+        let mut samples = vec![0.0; 50];
+        samples.extend(vec![0.2; 10]);
+
+        assert!(carried_overlap_contains_speech(&samples, 1_000, 0.15, 10));
+        assert!(!carried_overlap_contains_speech(
+            &vec![0.0; 60],
+            1_000,
+            0.15,
+            10
+        ));
     }
 
     #[test]

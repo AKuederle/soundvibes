@@ -449,6 +449,7 @@ pub fn run_daemon_loop(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stop_recording(
     worker: &TranscriptionWorker,
     config: &DaemonConfig,
@@ -475,6 +476,7 @@ fn stop_recording(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_active_recording(
     deps: &DaemonDeps,
     host: &cpal::Host,
@@ -511,6 +513,7 @@ fn start_active_recording(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stop_active_recording(
     worker: &TranscriptionWorker,
     config: &DaemonConfig,

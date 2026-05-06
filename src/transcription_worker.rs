@@ -1,4 +1,4 @@
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use crate::daemon::Transcriber;
@@ -70,10 +70,7 @@ impl TranscriptionWorker {
     }
 
     pub fn try_recv(&self) -> Option<TranscriptionResult> {
-        match self.results.try_recv() {
-            Ok(result) => Some(result),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-        }
+        self.results.try_recv().ok()
     }
 
     pub fn recv(&self) -> Option<TranscriptionResult> {

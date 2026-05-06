@@ -412,64 +412,6 @@ impl std::fmt::Display for SpeechAnalysis {
     }
 }
 
-#[cfg(test)]
-mod speech_detector_tests {
-    use super::*;
-
-    #[test]
-    fn test_silence_not_detected() {
-        let mut detector = SpeechDetector::new(0.01, 100, 16000);
-
-        // 100ms of silence (1600 samples at 16kHz)
-        let silence = vec![0.0f32; 1600];
-
-        assert!(!detector.process(&silence));
-        assert!(!detector.is_detected());
-    }
-
-    #[test]
-    fn test_sustained_speech_detected() {
-        let mut detector = SpeechDetector::new(0.01, 100, 16000);
-
-        // Generate 100ms of "speech" at RMS ~0.1
-        let speech: Vec<f32> = (0..1600).map(|i| 0.14 * (i as f32 * 0.1).sin()).collect();
-
-        assert!(detector.process(&speech));
-        assert!(detector.is_detected());
-    }
-
-    #[test]
-    fn test_brief_noise_not_detected() {
-        let mut detector = SpeechDetector::new(0.01, 100, 16000);
-
-        // 50ms of noise (not enough to confirm)
-        let noise: Vec<f32> = (0..800).map(|i| 0.14 * (i as f32 * 0.1).sin()).collect();
-        assert!(!detector.process(&noise));
-
-        // Then silence resets
-        let silence = vec![0.0f32; 800];
-        assert!(!detector.process(&silence));
-
-        // Accumulated should be reset
-        assert_eq!(detector.speech_samples(), 0);
-    }
-
-    #[test]
-    fn test_reset() {
-        let mut detector = SpeechDetector::new(0.01, 100, 16000);
-
-        // Detect speech
-        let speech: Vec<f32> = (0..1600).map(|i| 0.14 * (i as f32 * 0.1).sin()).collect();
-        detector.process(&speech);
-        assert!(detector.is_detected());
-
-        // Reset
-        detector.reset();
-        assert!(!detector.is_detected());
-        assert_eq!(detector.speech_samples(), 0);
-    }
-}
-
 fn duration_to_samples(sample_rate: u32, duration: Duration) -> usize {
     let seconds = duration.as_secs_f32();
     (sample_rate as f32 * seconds).round() as usize
@@ -648,4 +590,62 @@ where
                 format!("failed to build input stream: {err}"),
             )
         })
+}
+
+#[cfg(test)]
+mod speech_detector_tests {
+    use super::*;
+
+    #[test]
+    fn test_silence_not_detected() {
+        let mut detector = SpeechDetector::new(0.01, 100, 16000);
+
+        // 100ms of silence (1600 samples at 16kHz)
+        let silence = vec![0.0f32; 1600];
+
+        assert!(!detector.process(&silence));
+        assert!(!detector.is_detected());
+    }
+
+    #[test]
+    fn test_sustained_speech_detected() {
+        let mut detector = SpeechDetector::new(0.01, 100, 16000);
+
+        // Generate 100ms of "speech" at RMS ~0.1
+        let speech: Vec<f32> = (0..1600).map(|i| 0.14 * (i as f32 * 0.1).sin()).collect();
+
+        assert!(detector.process(&speech));
+        assert!(detector.is_detected());
+    }
+
+    #[test]
+    fn test_brief_noise_not_detected() {
+        let mut detector = SpeechDetector::new(0.01, 100, 16000);
+
+        // 50ms of noise (not enough to confirm)
+        let noise: Vec<f32> = (0..800).map(|i| 0.14 * (i as f32 * 0.1).sin()).collect();
+        assert!(!detector.process(&noise));
+
+        // Then silence resets
+        let silence = vec![0.0f32; 800];
+        assert!(!detector.process(&silence));
+
+        // Accumulated should be reset
+        assert_eq!(detector.speech_samples(), 0);
+    }
+
+    #[test]
+    fn test_reset() {
+        let mut detector = SpeechDetector::new(0.01, 100, 16000);
+
+        // Detect speech
+        let speech: Vec<f32> = (0..1600).map(|i| 0.14 * (i as f32 * 0.1).sin()).collect();
+        detector.process(&speech);
+        assert!(detector.is_detected());
+
+        // Reset
+        detector.reset();
+        assert!(!detector.is_detected());
+        assert_eq!(detector.speech_samples(), 0);
+    }
 }

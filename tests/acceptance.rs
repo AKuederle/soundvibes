@@ -233,10 +233,13 @@ fn at04_daemon_hold_key_captures_and_transcribes() -> Result<(), Box<dyn Error>>
         vad_silence_ms: 800,
         vad_threshold: 0.015,
         vad_chunk_ms: 250,
+        segment_target_ms: sv::segmentation::DEFAULT_SEGMENT_TARGET_MS,
+        segment_grace_ms: sv::segmentation::DEFAULT_SEGMENT_GRACE_MS,
+        segment_overlap_ms: sv::segmentation::DEFAULT_SEGMENT_OVERLAP_MS,
+        segment_min_ms: sv::segmentation::DEFAULT_SEGMENT_MIN_MS,
         debug_audio: false,
         debug_vad: false,
         dump_audio: false,
-        vad_model_path: None,
         audio_feedback: false,
         no_speech_timeout_ms: 0,
         hotkey: HotkeyConfig::default(),
@@ -288,10 +291,13 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
         vad_silence_ms: 800,
         vad_threshold: 0.015,
         vad_chunk_ms: 250,
+        segment_target_ms: sv::segmentation::DEFAULT_SEGMENT_TARGET_MS,
+        segment_grace_ms: sv::segmentation::DEFAULT_SEGMENT_GRACE_MS,
+        segment_overlap_ms: sv::segmentation::DEFAULT_SEGMENT_OVERLAP_MS,
+        segment_min_ms: sv::segmentation::DEFAULT_SEGMENT_MIN_MS,
         debug_audio: false,
         debug_vad: false,
         dump_audio: false,
-        vad_model_path: None,
         audio_feedback: false,
         no_speech_timeout_ms: 0,
         hotkey: HotkeyConfig::default(),
@@ -332,6 +338,7 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
     let mut output = TranscriptSignalOutput {
         lines: Vec::new(),
         transcript_sender,
+        transcript_marker: "Transcript 1: pause transcript",
     };
     let deps = DaemonDeps {
         audio: Box::new(TestAudioBackend::new(
@@ -356,10 +363,13 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
         vad_silence_ms: 20,
         vad_threshold: 0.015,
         vad_chunk_ms: 10,
+        segment_target_ms: sv::segmentation::DEFAULT_SEGMENT_TARGET_MS,
+        segment_grace_ms: sv::segmentation::DEFAULT_SEGMENT_GRACE_MS,
+        segment_overlap_ms: sv::segmentation::DEFAULT_SEGMENT_OVERLAP_MS,
+        segment_min_ms: 5,
         debug_audio: false,
         debug_vad: false,
         dump_audio: false,
-        vad_model_path: None,
         audio_feedback: false,
         no_speech_timeout_ms: 0,
         hotkey: HotkeyConfig::default(),
@@ -396,9 +406,87 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
 }
 
 #[cfg(feature = "test-support")]
+#[test]
+fn at05b_continuous_long_speech_transcribes_before_release() -> Result<(), Box<dyn Error>> {
+    let (sender, receiver) = control_channel();
+    let control_sender = sender.clone();
+    let (transcript_sender, transcript_receiver) = mpsc::channel();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut output = TranscriptSignalOutput {
+        lines: Vec::new(),
+        transcript_sender,
+        transcript_marker: "Transcript 1: timed transcript",
+    };
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::new(
+            vec!["Mic".to_string()],
+            vec![vec![0.2; 20], vec![0.2; 20], vec![0.2; 20]],
+        )),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
+            "timed transcript".to_string()
+        ])),
+    };
+    let config = DaemonConfig {
+        model_path: None,
+        download_model: false,
+        language: "en".to_string(),
+        device: None,
+        audio_host: AudioHost::Default,
+        sample_rate: 1_000,
+        format: OutputFormat::Plain,
+        mode: OutputMode::Stdout,
+        output: OutputConfig::default(),
+        vad: VadMode::Continuous,
+        vad_silence_ms: 100,
+        vad_threshold: 0.015,
+        vad_chunk_ms: 20,
+        segment_target_ms: 20,
+        segment_grace_ms: 20,
+        segment_overlap_ms: 5,
+        segment_min_ms: 10,
+        debug_audio: false,
+        debug_vad: false,
+        dump_audio: false,
+        audio_feedback: false,
+        no_speech_timeout_ms: 0,
+        hotkey: HotkeyConfig::default(),
+    };
+
+    let shutdown_trigger = Arc::clone(&shutdown);
+    let transcript_before_release = Arc::new(AtomicBool::new(false));
+    let transcript_before_release_trigger = Arc::clone(&transcript_before_release);
+    let control_thread = thread::spawn(move || {
+        let _ = control_sender.send(sv::daemon::ControlEvent::StartRecording);
+        if transcript_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok()
+        {
+            transcript_before_release_trigger.store(true, Ordering::Relaxed);
+        }
+        let _ = control_sender.send(sv::daemon::ControlEvent::StopRecording);
+        thread::sleep(Duration::from_millis(50));
+        shutdown_trigger.store(true, Ordering::Relaxed);
+    });
+
+    sv::daemon::run_daemon_loop(&config, &deps, &mut output, receiver, shutdown.as_ref())?;
+    control_thread.join().expect("control thread failed");
+
+    assert!(output
+        .stdout_lines()
+        .iter()
+        .any(|line| line.contains("Transcript 1: timed transcript")));
+    assert!(
+        transcript_before_release.load(Ordering::Relaxed),
+        "expected long continuous speech to transcribe before key release"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
 struct TranscriptSignalOutput {
     lines: Vec<String>,
     transcript_sender: mpsc::Sender<()>,
+    transcript_marker: &'static str,
 }
 
 #[cfg(feature = "test-support")]
@@ -411,7 +499,7 @@ impl TranscriptSignalOutput {
 #[cfg(feature = "test-support")]
 impl DaemonOutput for TranscriptSignalOutput {
     fn stdout(&mut self, message: &str) {
-        if message.contains("Transcript 1: pause transcript") {
+        if message.contains(self.transcript_marker) {
             let _ = self.transcript_sender.send(());
         }
         self.lines.push(message.to_string());

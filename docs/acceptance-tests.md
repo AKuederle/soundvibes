@@ -70,6 +70,13 @@ These tests validate the product behavior for the offline Linux CLI.
 - Expect: the first sentence is transcribed after the pause while the key is still held.
 - Pass: output appears after the pause and recording continues until key release.
 
+### AT-05b: Continuous long-speech timed segmentation
+- Setup: set `vad = "continuous"` with default segment timing or explicit `segment_target_ms`, `segment_grace_ms`, `segment_overlap_ms`, and `segment_min_ms`.
+- Command: `sv daemon start`.
+- Action: hold the configured key and keep speaking past the segment target without a full silence break.
+- Expect: SoundVibes starts transcribing a timed segment while audio capture continues.
+- Pass: output appears before key release, and the remaining tail is transcribed after release.
+
 ### AT-06: Offline operation
 - Setup: set `model` in config to `${XDG_DATA_HOME:-~/.local/share}/soundvibes/models/ggml-base.en.bin`.
 - Command: disconnect network, run `sv daemon start`, then hold/release the configured key.

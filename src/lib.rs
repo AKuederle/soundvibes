@@ -8,5 +8,4 @@ pub mod output;
 pub mod segmentation;
 pub mod transcription_worker;
 pub mod types;
-pub mod vad;
 pub mod whisper;

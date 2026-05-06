@@ -11,6 +11,10 @@ use sv::error::AppError;
 use sv::hotkey::HotkeyConfig;
 use sv::model::{model_language_for_transcription, ModelLanguage, ModelSize, ModelSpec};
 use sv::output::{OutputConfig, OutputMode};
+use sv::segmentation::{
+    DEFAULT_SEGMENT_GRACE_MS, DEFAULT_SEGMENT_MIN_MS, DEFAULT_SEGMENT_OVERLAP_MS,
+    DEFAULT_SEGMENT_TARGET_MS,
+};
 use sv::types::{AudioHost, OutputFormat, VadMode, VadSetting};
 
 #[derive(Parser, Debug)]
@@ -81,6 +85,18 @@ struct Cli {
         global = true
     )]
     vad_chunk_ms: u64,
+
+    #[arg(long, default_value_t = DEFAULT_SEGMENT_TARGET_MS, value_name = "MS", global = true)]
+    segment_target_ms: u64,
+
+    #[arg(long, default_value_t = DEFAULT_SEGMENT_GRACE_MS, value_name = "MS", global = true)]
+    segment_grace_ms: u64,
+
+    #[arg(long, default_value_t = DEFAULT_SEGMENT_OVERLAP_MS, value_name = "MS", global = true)]
+    segment_overlap_ms: u64,
+
+    #[arg(long, default_value_t = DEFAULT_SEGMENT_MIN_MS, value_name = "MS", global = true)]
+    segment_min_ms: u64,
 
     #[arg(long, default_value_t = false, global = true)]
     debug_audio: bool,
@@ -200,6 +216,10 @@ struct Config {
     vad_silence_ms: u64,
     vad_threshold: f32,
     vad_chunk_ms: u64,
+    segment_target_ms: u64,
+    segment_grace_ms: u64,
+    segment_overlap_ms: u64,
+    segment_min_ms: u64,
     debug_audio: bool,
     debug_vad: bool,
     list_devices: bool,
@@ -334,6 +354,34 @@ impl Config {
             file.vad_chunk_ms.unwrap_or(cli.vad_chunk_ms)
         };
 
+        let segment_target_ms =
+            if matches.value_source("segment_target_ms") == Some(ValueSource::CommandLine) {
+                cli.segment_target_ms
+            } else {
+                file.segment_target_ms.unwrap_or(cli.segment_target_ms)
+            };
+
+        let segment_grace_ms =
+            if matches.value_source("segment_grace_ms") == Some(ValueSource::CommandLine) {
+                cli.segment_grace_ms
+            } else {
+                file.segment_grace_ms.unwrap_or(cli.segment_grace_ms)
+            };
+
+        let segment_overlap_ms =
+            if matches.value_source("segment_overlap_ms") == Some(ValueSource::CommandLine) {
+                cli.segment_overlap_ms
+            } else {
+                file.segment_overlap_ms.unwrap_or(cli.segment_overlap_ms)
+            };
+
+        let segment_min_ms =
+            if matches.value_source("segment_min_ms") == Some(ValueSource::CommandLine) {
+                cli.segment_min_ms
+            } else {
+                file.segment_min_ms.unwrap_or(cli.segment_min_ms)
+            };
+
         let debug_audio = if matches.value_source("debug_audio") == Some(ValueSource::CommandLine) {
             cli.debug_audio
         } else {
@@ -418,6 +466,10 @@ impl Config {
             vad_silence_ms,
             vad_threshold,
             vad_chunk_ms,
+            segment_target_ms,
+            segment_grace_ms,
+            segment_overlap_ms,
+            segment_min_ms,
             debug_audio,
             debug_vad,
             list_devices,
@@ -447,6 +499,10 @@ struct FileConfig {
     vad_silence_ms: Option<u64>,
     vad_threshold: Option<f32>,
     vad_chunk_ms: Option<u64>,
+    segment_target_ms: Option<u64>,
+    segment_grace_ms: Option<u64>,
+    segment_overlap_ms: Option<u64>,
+    segment_min_ms: Option<u64>,
     debug_audio: Option<bool>,
     debug_vad: Option<bool>,
     list_devices: Option<bool>,
@@ -519,23 +575,6 @@ fn main() {
         }
     };
 
-    // Prepare VAD model for continuous mode
-    let vad_model_path = if config.vad == VadMode::Continuous && !config.list_devices {
-        println!("Downloading VAD model if needed...");
-        match sv::model::ensure_vad_model() {
-            Ok(path) => {
-                println!("VAD model: {}", path.display());
-                Some(path)
-            }
-            Err(err) => {
-                eprintln!("error: {err}");
-                process::exit(err.exit_code());
-            }
-        }
-    } else {
-        None
-    };
-
     println!("SoundVibes sv {}", env!("CARGO_PKG_VERSION"));
     if let Some(prepared) = &prepared_model {
         if prepared.downloaded {
@@ -551,6 +590,10 @@ fn main() {
     println!("VAD silence timeout: {} ms", config.vad_silence_ms);
     println!("VAD threshold: {:.4}", config.vad_threshold);
     println!("VAD chunk: {} ms", config.vad_chunk_ms);
+    println!("Segment target: {} ms", config.segment_target_ms);
+    println!("Segment grace: {} ms", config.segment_grace_ms);
+    println!("Segment overlap: {} ms", config.segment_overlap_ms);
+    println!("Segment minimum: {} ms", config.segment_min_ms);
     println!("Dump audio: {}", config.dump_audio);
     println!("Audio host: {:?}", config.audio_host);
     if let Some(device) = &config.device {
@@ -579,10 +622,13 @@ fn main() {
             vad_silence_ms: config.vad_silence_ms,
             vad_threshold: config.vad_threshold,
             vad_chunk_ms: config.vad_chunk_ms,
+            segment_target_ms: config.segment_target_ms,
+            segment_grace_ms: config.segment_grace_ms,
+            segment_overlap_ms: config.segment_overlap_ms,
+            segment_min_ms: config.segment_min_ms,
             debug_audio: config.debug_audio,
             debug_vad: config.debug_vad,
             dump_audio: config.dump_audio,
-            vad_model_path,
             audio_feedback: config.audio_feedback,
             no_speech_timeout_ms: config.no_speech_timeout_ms,
             hotkey: config.hotkey.clone(),

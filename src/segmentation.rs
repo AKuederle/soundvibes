@@ -1,3 +1,8 @@
+pub const DEFAULT_SEGMENT_TARGET_MS: u64 = 10_000;
+pub const DEFAULT_SEGMENT_GRACE_MS: u64 = 2_000;
+pub const DEFAULT_SEGMENT_OVERLAP_MS: u64 = 400;
+pub const DEFAULT_SEGMENT_MIN_MS: u64 = 1_200;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SegmentConfig {
     pub sample_rate: u32,
@@ -67,7 +72,8 @@ pub fn carry_after_cut(
     match reason {
         CutReason::Silence => Vec::new(),
         CutReason::SoftLimitPause | CutReason::HardLimit => {
-            let start = speech_end.saturating_sub(config.overlap_samples);
+            let bounded_end = speech_end.min(samples.len());
+            let start = bounded_end.saturating_sub(config.overlap_samples);
             samples[start..].to_vec()
         }
     }
@@ -164,6 +170,15 @@ mod tests {
         assert_eq!(carried.len(), 600);
         assert_eq!(carried.first().copied(), Some(600.0));
         assert_eq!(carried.last().copied(), Some(1199.0));
+    }
+
+    #[test]
+    fn clamps_carry_cut_points_to_sample_bounds() {
+        let samples = (0..10).map(|index| index as f32).collect::<Vec<_>>();
+
+        let carried = carry_after_cut(&samples, 20, &config(), CutReason::HardLimit);
+
+        assert_eq!(carried, samples);
     }
 
     #[test]

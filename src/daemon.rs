@@ -1,6 +1,7 @@
 use chrono::{Local, Utc};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::flag;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -18,6 +19,8 @@ use crate::feedback;
 use crate::hotkey::{self, HotkeyConfig};
 use crate::model::{self, ModelLanguage, ModelSize, ModelSpec};
 use crate::output::{self, OutputConfig, OutputMode};
+use crate::segmentation::{self, CutReason, SegmentConfig, SegmentDecision};
+use crate::transcription_worker::{TranscriptionJob, TranscriptionResult, TranscriptionWorker};
 use crate::types::{AudioHost, OutputFormat, VadMode};
 use crate::whisper::WhisperContext;
 
@@ -36,10 +39,13 @@ pub struct DaemonConfig {
     pub vad_silence_ms: u64,
     pub vad_threshold: f32,
     pub vad_chunk_ms: u64,
+    pub segment_target_ms: u64,
+    pub segment_grace_ms: u64,
+    pub segment_overlap_ms: u64,
+    pub segment_min_ms: u64,
     pub debug_audio: bool,
     pub debug_vad: bool,
     pub dump_audio: bool,
-    pub vad_model_path: Option<PathBuf>,
     pub audio_feedback: bool,
     pub no_speech_timeout_ms: u64,
     pub hotkey: HotkeyConfig,
@@ -183,9 +189,10 @@ pub fn run_daemon_loop(
         }
     }
 
-    let mut transcriber = deps
+    let transcriber = deps
         .transcriber_factory
         .load(config.model_path.as_deref())?;
+    let mut worker = TranscriptionWorker::start(transcriber);
 
     let vad = audio::VadConfig::new(
         config.vad == VadMode::On || config.vad == VadMode::Continuous,
@@ -197,12 +204,14 @@ pub fn run_daemon_loop(
 
     let mut recording = false;
     let mut buffer = Vec::new();
-    let mut utterance_index = 0u64;
+    let mut next_job_index = 1u64;
+    let mut next_emit_index = 1u64;
+    let mut pending_jobs = 0usize;
+    let mut pending_results = BTreeMap::new();
+    let mut last_emitted_transcript = String::new();
     let mut capture: Option<Box<dyn CaptureSource>> = None;
     // For continuous mode: track silence at end of buffer
     let mut trailing_silence_samples: usize = 0;
-    let silence_threshold_samples =
-        (config.vad_silence_ms as f32 / 1000.0 * config.sample_rate as f32) as usize;
     // For no-speech timeout: track when recording started and sustained speech
     let mut recording_started: Option<std::time::Instant> = None;
     let mut speech_detected = false;
@@ -211,20 +220,42 @@ pub fn run_daemon_loop(
     let speech_confirm_samples = (0.1 * config.sample_rate as f32) as usize;
     // Grace period after recording starts to ignore audio feedback pickup (500ms)
     let speech_detection_grace_ms: u64 = if config.audio_feedback { 500 } else { 0 };
+    let segment_config = segment_config(config);
 
     loop {
+        drain_worker_results(
+            &worker,
+            config,
+            output,
+            &mut pending_results,
+            &mut next_emit_index,
+            &mut pending_jobs,
+            &mut last_emitted_transcript,
+        );
+
         if shutdown.load(Ordering::Relaxed) {
             if recording {
                 stop_recording(
-                    &*transcriber,
+                    &worker,
                     config,
                     &vad,
                     &mut capture,
                     &mut buffer,
-                    &mut utterance_index,
+                    &mut next_job_index,
+                    &mut pending_jobs,
                     output,
                 )?;
             }
+            wait_for_pending_results(
+                &worker,
+                config,
+                output,
+                &mut pending_results,
+                &mut next_emit_index,
+                &mut pending_jobs,
+                &mut last_emitted_transcript,
+            );
+            worker.shutdown()?;
             output.stdout("Daemon shutting down.");
             break;
         }
@@ -249,15 +280,26 @@ pub fn run_daemon_loop(
             Ok(ControlEvent::StopRecording) => {
                 if recording {
                     stop_active_recording(
-                        &*transcriber,
+                        &worker,
                         config,
                         &vad,
                         &mut recording,
                         &mut capture,
                         &mut buffer,
-                        &mut utterance_index,
+                        &mut next_job_index,
+                        &mut pending_jobs,
                         output,
                     )?;
+                    wait_for_pending_results(
+                        &worker,
+                        config,
+                        output,
+                        &mut pending_results,
+                        &mut next_emit_index,
+                        &mut pending_jobs,
+                        &mut last_emitted_transcript,
+                    );
+                    output.stdout("Ready for next utterance.");
                     if config.audio_feedback {
                         feedback::play_stop_sound();
                     }
@@ -276,6 +318,16 @@ pub fn run_daemon_loop(
                     capture = None;
                     output.stdout("Recording stopped for model reload.");
                 }
+                wait_for_pending_results(
+                    &worker,
+                    config,
+                    output,
+                    &mut pending_results,
+                    &mut next_emit_index,
+                    &mut pending_jobs,
+                    &mut last_emitted_transcript,
+                );
+                worker.shutdown()?;
                 let spec = ModelSpec::new(size, model_language);
                 match model::prepare_model(None, &spec, config.download_model) {
                     Ok(prepared) => {
@@ -285,7 +337,7 @@ pub fn run_daemon_loop(
                         let new_path = prepared.path.clone();
                         match deps.transcriber_factory.load(Some(&new_path)) {
                             Ok(new_transcriber) => {
-                                transcriber = new_transcriber;
+                                worker = TranscriptionWorker::start(new_transcriber);
                                 output.stdout(&format!(
                                     "Model reloaded: size={}, model-language={}",
                                     model_size_token(size),
@@ -337,57 +389,40 @@ pub fn run_daemon_loop(
                         }
                     }
 
-                    // In continuous mode, detect silence at end of buffer
                     if config.vad == VadMode::Continuous {
                         if rms < config.vad_threshold {
-                            // Silence detected, accumulate
                             trailing_silence_samples += new_samples;
                         } else {
-                            // Speech detected, reset silence counter
                             trailing_silence_samples = 0;
                         }
 
-                        // If we have enough silence and some speech before it, transcribe
-                        if trailing_silence_samples >= silence_threshold_samples {
-                            let speech_end = buffer.len() - trailing_silence_samples;
-                            if speech_end > 0 {
-                                let audio_segment = &buffer[..speech_end];
-                                let duration_ms =
-                                    audio::samples_to_ms(audio_segment.len(), config.sample_rate);
-
-                                utterance_index += 1;
-                                match transcriber.transcribe(audio_segment, Some(&config.language))
-                                {
-                                    Ok(transcript) => {
-                                        if !transcript.trim().is_empty() {
-                                            if let Err(err) = emit_transcript(
-                                                config,
-                                                output,
-                                                &transcript,
-                                                audio::SegmentInfo {
-                                                    index: utterance_index,
-                                                    duration_ms,
-                                                },
-                                            ) {
-                                                output.stderr(&format!(
-                                                    "Failed to emit transcript: {err}"
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    Err(err) => {
-                                        output.stderr(&format!("Transcription error: {err}"));
-                                    }
-                                }
-
-                                // Clear buffer and reset speech detection for next utterance
-                                buffer.clear();
-                                trailing_silence_samples = 0;
-                                // Reset speech detection so timeout can trigger if user stops talking
-                                speech_detected = false;
-                                speech_samples = 0;
-                                recording_started = Some(std::time::Instant::now());
-                            }
+                        if let SegmentDecision::Cut { speech_end, reason } =
+                            segmentation::decide_segment(
+                                &segment_config,
+                                buffer.len(),
+                                trailing_silence_samples,
+                                rms,
+                            )
+                        {
+                            submit_segment(
+                                &worker,
+                                config,
+                                &buffer[..speech_end],
+                                reason != CutReason::Silence,
+                                &mut next_job_index,
+                                &mut pending_jobs,
+                                output,
+                            )?;
+                            buffer = segmentation::carry_after_cut(
+                                &buffer,
+                                speech_end,
+                                &segment_config,
+                                reason,
+                            );
+                            trailing_silence_samples = 0;
+                            speech_detected = false;
+                            speech_samples = 0;
+                            recording_started = Some(std::time::Instant::now());
                         }
                     }
                 }
@@ -415,19 +450,28 @@ pub fn run_daemon_loop(
 }
 
 fn stop_recording(
-    transcriber: &dyn Transcriber,
+    worker: &TranscriptionWorker,
     config: &DaemonConfig,
     vad: &audio::VadConfig,
     capture: &mut Option<Box<dyn CaptureSource>>,
     buffer: &mut Vec<f32>,
-    utterance_index: &mut u64,
+    next_job_index: &mut u64,
+    pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
 ) -> Result<(), AppError> {
     let mut active = capture
         .take()
         .ok_or_else(|| AppError::runtime("capture stream missing"))?;
     active.drain(buffer);
-    finalize_recording(transcriber, config, vad, buffer, utterance_index, output)?;
+    submit_final_recording(
+        worker,
+        config,
+        vad,
+        buffer,
+        next_job_index,
+        pending_jobs,
+        output,
+    )?;
     Ok(())
 }
 
@@ -468,59 +512,195 @@ fn start_active_recording(
 }
 
 fn stop_active_recording(
-    transcriber: &dyn Transcriber,
+    worker: &TranscriptionWorker,
     config: &DaemonConfig,
     vad: &audio::VadConfig,
     recording: &mut bool,
     capture: &mut Option<Box<dyn CaptureSource>>,
     buffer: &mut Vec<f32>,
-    utterance_index: &mut u64,
+    next_job_index: &mut u64,
+    pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
 ) -> Result<(), AppError> {
     *recording = false;
     stop_recording(
-        transcriber,
+        worker,
         config,
         vad,
         capture,
         buffer,
-        utterance_index,
+        next_job_index,
+        pending_jobs,
         output,
     )
 }
 
-fn finalize_recording(
-    transcriber: &dyn Transcriber,
+fn submit_final_recording(
+    worker: &TranscriptionWorker,
     config: &DaemonConfig,
     vad: &audio::VadConfig,
     buffer: &[f32],
-    utterance_index: &mut u64,
+    next_job_index: &mut u64,
+    pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
 ) -> Result<(), AppError> {
     let trimmed = audio::trim_trailing_silence(buffer, config.sample_rate, vad);
     if trimmed.is_empty() {
         return Ok(());
     }
-    *utterance_index += 1;
-    let duration_ms = audio::samples_to_ms(trimmed.len(), config.sample_rate);
-    if config.dump_audio {
-        dump_audio_samples(&trimmed, config.sample_rate, output)?;
+    submit_segment(
+        worker,
+        config,
+        &trimmed,
+        false,
+        next_job_index,
+        pending_jobs,
+        output,
+    )
+}
+
+fn submit_segment(
+    worker: &TranscriptionWorker,
+    config: &DaemonConfig,
+    samples: &[f32],
+    had_overlap: bool,
+    next_job_index: &mut u64,
+    pending_jobs: &mut usize,
+    output: &mut dyn DaemonOutput,
+) -> Result<(), AppError> {
+    if samples.is_empty() {
+        return Ok(());
     }
-    let transcript = transcriber
-        .transcribe(&trimmed, Some(&config.language))
-        .map_err(|err| AppError::runtime(err.to_string()))?;
-    emit_transcript(
+
+    if config.dump_audio {
+        dump_audio_samples(samples, config.sample_rate, output)?;
+    }
+    let index = *next_job_index;
+    *next_job_index += 1;
+    *pending_jobs += 1;
+    worker.submit(TranscriptionJob {
+        index,
+        samples: samples.to_vec(),
+        duration_ms: audio::samples_to_ms(samples.len(), config.sample_rate),
+        language: Some(config.language.clone()),
+        had_overlap,
+    })
+}
+
+fn drain_worker_results(
+    worker: &TranscriptionWorker,
+    config: &DaemonConfig,
+    output: &mut dyn DaemonOutput,
+    pending_results: &mut BTreeMap<u64, TranscriptionResult>,
+    next_emit_index: &mut u64,
+    pending_jobs: &mut usize,
+    last_emitted_transcript: &mut String,
+) {
+    while let Some(result) = worker.try_recv() {
+        pending_results.insert(result.index, result);
+    }
+    emit_ready_results(
         config,
         output,
-        &transcript,
-        audio::SegmentInfo {
-            index: *utterance_index,
-            duration_ms,
-        },
-    )
-    .map_err(AppError::runtime)?;
-    output.stdout("Ready for next utterance.");
-    Ok(())
+        pending_results,
+        next_emit_index,
+        pending_jobs,
+        last_emitted_transcript,
+    );
+}
+
+fn wait_for_pending_results(
+    worker: &TranscriptionWorker,
+    config: &DaemonConfig,
+    output: &mut dyn DaemonOutput,
+    pending_results: &mut BTreeMap<u64, TranscriptionResult>,
+    next_emit_index: &mut u64,
+    pending_jobs: &mut usize,
+    last_emitted_transcript: &mut String,
+) {
+    while *pending_jobs > 0 {
+        drain_worker_results(
+            worker,
+            config,
+            output,
+            pending_results,
+            next_emit_index,
+            pending_jobs,
+            last_emitted_transcript,
+        );
+        if *pending_jobs == 0 {
+            break;
+        }
+        match worker.recv() {
+            Some(result) => {
+                pending_results.insert(result.index, result);
+                emit_ready_results(
+                    config,
+                    output,
+                    pending_results,
+                    next_emit_index,
+                    pending_jobs,
+                    last_emitted_transcript,
+                );
+            }
+            None => break,
+        }
+    }
+}
+
+fn emit_ready_results(
+    config: &DaemonConfig,
+    output: &mut dyn DaemonOutput,
+    pending_results: &mut BTreeMap<u64, TranscriptionResult>,
+    next_emit_index: &mut u64,
+    pending_jobs: &mut usize,
+    last_emitted_transcript: &mut String,
+) {
+    while let Some(result) = pending_results.remove(next_emit_index) {
+        *next_emit_index += 1;
+        *pending_jobs = pending_jobs.saturating_sub(1);
+        match result.transcript {
+            Ok(transcript) => {
+                let text = if result.had_overlap && !last_emitted_transcript.trim().is_empty() {
+                    segmentation::dedupe_boundary(last_emitted_transcript, &transcript)
+                } else {
+                    transcript
+                };
+                if !text.trim().is_empty() {
+                    if let Err(err) = emit_transcript(
+                        config,
+                        output,
+                        &text,
+                        audio::SegmentInfo {
+                            index: result.index,
+                            duration_ms: result.duration_ms,
+                        },
+                    ) {
+                        output.stderr(&format!("Failed to emit transcript: {err}"));
+                    } else {
+                        *last_emitted_transcript = text;
+                    }
+                }
+            }
+            Err(err) => output.stderr(&format!("Transcription error: {err}")),
+        }
+    }
+}
+
+fn segment_config(config: &DaemonConfig) -> SegmentConfig {
+    SegmentConfig {
+        sample_rate: config.sample_rate,
+        vad_threshold: config.vad_threshold,
+        silence_samples: samples_from_ms(config.vad_silence_ms, config.sample_rate),
+        target_samples: samples_from_ms(config.segment_target_ms, config.sample_rate),
+        grace_samples: samples_from_ms(config.segment_grace_ms, config.sample_rate),
+        overlap_samples: samples_from_ms(config.segment_overlap_ms, config.sample_rate),
+        min_segment_samples: samples_from_ms(config.segment_min_ms, config.sample_rate),
+    }
+}
+
+fn samples_from_ms(ms: u64, sample_rate: u32) -> usize {
+    ((ms as f64 / 1000.0) * sample_rate as f64).round() as usize
 }
 
 fn emit_transcript(
@@ -1064,6 +1244,10 @@ mod tests {
     use super::test_support::{
         control_channel, TestAudioBackend, TestOutput, TestTranscriberFactory,
     };
+    use crate::segmentation::{
+        DEFAULT_SEGMENT_GRACE_MS, DEFAULT_SEGMENT_MIN_MS, DEFAULT_SEGMENT_OVERLAP_MS,
+        DEFAULT_SEGMENT_TARGET_MS,
+    };
 
     #[test]
     fn daemon_loop_emits_transcript_to_output() -> Result<(), AppError> {
@@ -1092,10 +1276,13 @@ mod tests {
             vad_silence_ms: 800,
             vad_threshold: 0.015,
             vad_chunk_ms: 250,
+            segment_target_ms: DEFAULT_SEGMENT_TARGET_MS,
+            segment_grace_ms: DEFAULT_SEGMENT_GRACE_MS,
+            segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
+            segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
             debug_audio: false,
             debug_vad: false,
             dump_audio: false,
-            vad_model_path: None,
             audio_feedback: false,
             no_speech_timeout_ms: 0,
             hotkey: HotkeyConfig::default(),
@@ -1150,10 +1337,13 @@ mod tests {
             vad_silence_ms: 20,
             vad_threshold: 0.015,
             vad_chunk_ms: 20,
+            segment_target_ms: DEFAULT_SEGMENT_TARGET_MS,
+            segment_grace_ms: DEFAULT_SEGMENT_GRACE_MS,
+            segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
+            segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
             debug_audio: false,
             debug_vad: false,
             dump_audio: false,
-            vad_model_path: None,
             audio_feedback: false,
             no_speech_timeout_ms: 0,
             hotkey: HotkeyConfig::default(),
@@ -1177,6 +1367,102 @@ mod tests {
             .iter()
             .any(|line| line.contains("Transcript 1: pause transcript")));
         Ok(())
+    }
+
+    #[test]
+    fn continuous_mode_transcribes_long_speech_before_release() -> Result<(), AppError> {
+        let (sender, receiver) = control_channel();
+        let control_sender = sender.clone();
+        let (transcript_sender, transcript_receiver) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut output = SignalOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            transcript_sender,
+        };
+        let deps = DaemonDeps {
+            audio: Box::new(TestAudioBackend::new(
+                vec!["Mic".to_string()],
+                vec![vec![0.2; 20], vec![0.2; 20], vec![0.2; 20]],
+            )),
+            transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
+                "timed transcript".to_string()
+            ])),
+        };
+        let config = DaemonConfig {
+            model_path: None,
+            download_model: false,
+            language: "en".to_string(),
+            device: None,
+            audio_host: AudioHost::Default,
+            sample_rate: 1_000,
+            format: OutputFormat::Plain,
+            mode: OutputMode::Stdout,
+            output: OutputConfig::default(),
+            vad: VadMode::Continuous,
+            vad_silence_ms: 100,
+            vad_threshold: 0.015,
+            vad_chunk_ms: 20,
+            segment_target_ms: 20,
+            segment_grace_ms: 20,
+            segment_overlap_ms: 5,
+            segment_min_ms: 10,
+            debug_audio: false,
+            debug_vad: false,
+            dump_audio: false,
+            audio_feedback: false,
+            no_speech_timeout_ms: 0,
+            hotkey: HotkeyConfig::default(),
+        };
+
+        let shutdown_trigger = Arc::clone(&shutdown);
+        let transcript_before_release = Arc::new(AtomicBool::new(false));
+        let transcript_before_release_trigger = Arc::clone(&transcript_before_release);
+        let control_thread = thread::spawn(move || {
+            let _ = control_sender.send(ControlEvent::StartRecording);
+            if transcript_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .is_ok()
+            {
+                transcript_before_release_trigger.store(true, Ordering::Relaxed);
+            }
+            let _ = control_sender.send(ControlEvent::StopRecording);
+            thread::sleep(Duration::from_millis(50));
+            shutdown_trigger.store(true, Ordering::Relaxed);
+        });
+
+        let result = run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown);
+        control_thread.join().expect("control thread failed");
+        result?;
+
+        assert!(output
+            .stdout
+            .iter()
+            .any(|line| line.contains("Transcript 1: timed transcript")));
+        assert!(
+            transcript_before_release.load(Ordering::Relaxed),
+            "expected timed continuous segmentation before key release"
+        );
+        Ok(())
+    }
+
+    struct SignalOutput {
+        stdout: Vec<String>,
+        stderr: Vec<String>,
+        transcript_sender: mpsc::Sender<()>,
+    }
+
+    impl DaemonOutput for SignalOutput {
+        fn stdout(&mut self, message: &str) {
+            if message.contains("Transcript 1: timed transcript") {
+                let _ = self.transcript_sender.send(());
+            }
+            self.stdout.push(message.to_string());
+        }
+
+        fn stderr(&mut self, message: &str) {
+            self.stderr.push(message.to_string());
+        }
     }
 
     #[test]

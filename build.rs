@@ -85,7 +85,6 @@ fn main() {
         .allowlist_function("whisper_full_get_segment_text")
         .allowlist_function("whisper_free")
         .allowlist_function("whisper_log_set")
-        .allowlist_function("whisper_vad_.*")
         .allowlist_type("whisper_.*")
         .allowlist_type("ggml_.*")
         .allowlist_var("whisper_sampling_strategy_.*")

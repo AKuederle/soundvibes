@@ -312,7 +312,6 @@ pub struct SpeechDetector {
     confirm_samples: usize,
     speech_samples: usize,
     detected: bool,
-    sample_rate: u32,
 }
 
 impl SpeechDetector {
@@ -327,7 +326,6 @@ impl SpeechDetector {
             confirm_samples,
             speech_samples: 0,
             detected: false,
-            sample_rate,
         }
     }
 

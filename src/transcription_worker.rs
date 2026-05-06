@@ -8,7 +8,7 @@ pub struct TranscriptionJob {
     pub index: u64,
     pub samples: Vec<f32>,
     pub duration_ms: u64,
-    pub language: String,
+    pub language: Option<String>,
     pub had_overlap: bool,
 }
 
@@ -39,7 +39,8 @@ impl TranscriptionWorker {
             while let Ok(command) = job_receiver.recv() {
                 match command {
                     WorkerCommand::Transcribe(job) => {
-                        let transcript = transcriber.transcribe(&job.samples, Some(&job.language));
+                        let transcript =
+                            transcriber.transcribe(&job.samples, job.language.as_deref());
                         let result = TranscriptionResult {
                             index: job.index,
                             duration_ms: job.duration_ms,
@@ -137,7 +138,7 @@ mod tests {
                 index: 7,
                 samples: vec![0.2; 160],
                 duration_ms: 10,
-                language: "en".to_string(),
+                language: Some("en".to_string()),
                 had_overlap: false,
             })
             .expect("submit job");
@@ -157,6 +158,45 @@ mod tests {
 
         assert_eq!(result.index, 7);
         assert_eq!(result.transcript.expect("transcript"), "done");
+        worker.shutdown().expect("shutdown worker");
+    }
+
+    struct LanguageProbeTranscriber {
+        seen_language: mpsc::Sender<Option<String>>,
+    }
+
+    impl Transcriber for LanguageProbeTranscriber {
+        fn transcribe(&self, _samples: &[f32], language: Option<&str>) -> Result<String, AppError> {
+            self.seen_language
+                .send(language.map(str::to_string))
+                .expect("language signal");
+            Ok("done".to_string())
+        }
+    }
+
+    #[test]
+    fn worker_preserves_automatic_language_detection() {
+        let (language_sender, language_receiver) = mpsc::channel();
+        let mut worker = TranscriptionWorker::start(Box::new(LanguageProbeTranscriber {
+            seen_language: language_sender,
+        }));
+
+        worker
+            .submit(TranscriptionJob {
+                index: 8,
+                samples: vec![0.2; 160],
+                duration_ms: 10,
+                language: None,
+                had_overlap: false,
+            })
+            .expect("submit job");
+
+        assert_eq!(
+            language_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("language signal"),
+            None
+        );
         worker.shutdown().expect("shutdown worker");
     }
 }

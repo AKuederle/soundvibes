@@ -49,6 +49,16 @@ sv daemon start
 
 Hold the configured key while speaking, then release it to finish the recording. Continuous VAD can emit segments during longer holds when it detects pauses.
 
+Inspect or control the running daemon with acknowledged commands:
+
+```bash
+sv daemon status
+sv daemon set-model --size small --model-language en
+sv daemon stop
+```
+
+`status` reports the current recording state and transcription language. Model changes return only after loading succeeds or fails.
+
 Output modes:
 
 - `paste` (default): temporarily copies text, pastes with `dotool`, then restores the clipboard.

@@ -479,20 +479,19 @@ mod tests {
             vec![discovered("event1", 1), discovered("event2", 2)],
             |_| Some(()),
         );
-        assert_eq!(
+        assert!(matches!(
             devices.set_pressed(0, true),
             Some(ControlEvent::StartRecording)
-        );
-        assert_eq!(devices.set_pressed(1, true), None);
+        ));
+        assert!(devices.set_pressed(1, true).is_none());
 
-        assert_eq!(
-            devices.reconcile(vec![discovered("event2", 2)], |_| Some(())),
-            None
-        );
-        assert_eq!(
+        assert!(devices
+            .reconcile(vec![discovered("event2", 2)], |_| Some(()))
+            .is_none());
+        assert!(matches!(
             devices.reconcile(Vec::new(), |_| Some(())),
             Some(ControlEvent::StopRecording)
-        );
+        ));
     }
 
     #[test]
@@ -523,10 +522,10 @@ mod tests {
             hotkey_press(Key::KEY_RIGHTCTRL, Key::KEY_RIGHTCTRL, 1),
             Some(true)
         );
-        assert_eq!(
+        assert!(matches!(
             devices.set_pressed(0, true),
             Some(ControlEvent::StartRecording)
-        );
+        ));
         assert_eq!(
             hotkey_press(Key::KEY_RIGHTCTRL, Key::KEY_RIGHTCTRL, 2),
             None
@@ -535,9 +534,9 @@ mod tests {
             hotkey_press(Key::KEY_RIGHTCTRL, Key::KEY_RIGHTCTRL, 0),
             Some(false)
         );
-        assert_eq!(
+        assert!(matches!(
             devices.set_pressed(0, false),
             Some(ControlEvent::StopRecording)
-        );
+        ));
     }
 }

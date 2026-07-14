@@ -139,6 +139,7 @@ enum CliCommand {
 #[derive(Subcommand, Debug, Copy, Clone, PartialEq, Eq)]
 enum DaemonCommand {
     Start,
+    Status,
     Stop,
     #[command(name = "set-model")]
     SetModel {
@@ -154,6 +155,7 @@ enum DaemonCommand {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum CliMode {
     RunDaemon,
+    StatusDaemon,
     StopDaemon,
     ShowTranscriptPath,
     SetModel {
@@ -169,6 +171,9 @@ fn resolve_cli_mode(cli: &Cli) -> CliMode {
         Some(CliCommand::Daemon {
             command: DaemonCommand::Start,
         }) => CliMode::RunDaemon,
+        Some(CliCommand::Daemon {
+            command: DaemonCommand::Status,
+        }) => CliMode::StatusDaemon,
         Some(CliCommand::Daemon {
             command: DaemonCommand::Stop,
         }) => CliMode::StopDaemon,
@@ -386,6 +391,20 @@ fn main() {
     let cli = Cli::from_arg_matches(&matches).expect("Failed to parse CLI arguments");
     let mode = resolve_cli_mode(&cli);
     match mode {
+        CliMode::StatusDaemon => {
+            match daemon::send_status_command() {
+                Ok(response) => println!(
+                    "state={} language={}",
+                    response.state.as_deref().unwrap_or("unknown"),
+                    response.language.as_deref().unwrap_or("unknown")
+                ),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    process::exit(err.exit_code());
+                }
+            }
+            return;
+        }
         CliMode::StopDaemon => {
             if let Err(err) = daemon::send_stop_command() {
                 eprintln!("error: {err}");
@@ -580,6 +599,7 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::sync::{Mutex, OnceLock};
+    use std::thread;
     use std::time::Duration;
 
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -634,20 +654,27 @@ mod tests {
         let socket_path = daemon::daemon_socket_path()?;
         let (_socket_guard, control_events, _sender) = daemon::start_socket_listener(&socket_path)?;
 
-        daemon::send_record_start_command()?;
-
+        let client = thread::spawn(daemon::send_record_start_command);
         match control_events.recv_timeout(Duration::from_secs(1)) {
-            Ok(daemon::ControlEvent::StartRecording) => Ok(()),
-            Ok(daemon::ControlEvent::StopRecording) => {
-                Err(AppError::runtime("unexpected record-stop event"))
+            Ok(daemon::ControlEvent::Request { event, respond_to })
+                if matches!(*event, daemon::ControlEvent::StartRecording) =>
+            {
+                let _ = respond_to.send(daemon::ControlResponse {
+                    api_version: "1".to_string(),
+                    ok: true,
+                    state: Some("recording".to_string()),
+                    language: Some("en".to_string()),
+                    message: None,
+                });
             }
-            Ok(daemon::ControlEvent::Stop) => Err(AppError::runtime("unexpected stop event")),
-            Ok(daemon::ControlEvent::SetModel { .. }) => {
-                Err(AppError::runtime("unexpected set-model event"))
-            }
-            Ok(daemon::ControlEvent::Error(message)) => Err(AppError::runtime(message)),
-            Err(_) => Err(AppError::runtime("record-start command not received")),
+            Ok(event) => return Err(AppError::runtime(format!("unexpected event: {event:?}"))),
+            Err(_) => return Err(AppError::runtime("record-start command not received")),
         }
+        let response = client
+            .join()
+            .map_err(|_| AppError::runtime("record-start client panicked"))??;
+        assert_eq!(response.state.as_deref(), Some("recording"));
+        Ok(())
     }
 
     #[test]
@@ -694,6 +721,12 @@ mod tests {
     fn parses_daemon_stop_subcommand() {
         let cli = Cli::try_parse_from(["sv", "daemon", "stop"]).expect("failed to parse cli");
         assert_eq!(resolve_cli_mode(&cli), CliMode::StopDaemon);
+    }
+
+    #[test]
+    fn parses_daemon_status_subcommand() {
+        let cli = Cli::try_parse_from(["sv", "daemon", "status"]).expect("failed to parse cli");
+        assert_eq!(resolve_cli_mode(&cli), CliMode::StatusDaemon);
     }
 
     #[test]

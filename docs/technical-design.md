@@ -53,6 +53,8 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Track the hold state per keyboard so disconnecting the last pressed device stops recording without affecting another pressed keyboard.
 - Store the socket in `${XDG_RUNTIME_DIR}/soundvibes/sv.sock`.
 - Keep socket commands for daemon lifecycle and external start/stop integration.
+- Return a versioned JSON response after each command is processed; expose `sv daemon status` for recording state and language.
+- Report model reload failures to the requesting client instead of treating a successful socket write as a successful reload.
 
 ### Text Output
 - Use an output mode to select stdout, clipboard, paste, or direct typing.

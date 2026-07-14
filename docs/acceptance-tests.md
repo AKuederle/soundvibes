@@ -110,3 +110,9 @@ These tests validate the product behavior for the offline Linux CLI.
 - Action: put known content with a known MIME type in the clipboard, dictate text, and let SoundVibes paste it.
 - Expect: dictated text is pasted through the configured paste shortcut, and the previous clipboard content is restored with its original MIME type.
 - Pass: automated test-support verifies the command sequence; manual KDE verification confirms Klipper does not retain the temporary transcription when the KDE history-suppression hint is honored.
+
+### AT-12: Daemon commands are acknowledged
+- Setup: start the control socket and daemon loop with test-support audio and transcription adapters.
+- Command: request `status`, request a missing model reload, then request `stop`.
+- Expect: status returns versioned JSON with `state = "idle"` and `language = "en"`; model reload returns its processing error; stop returns success.
+- Pass: each client receives the daemon loop's response rather than inferring success from the socket write.

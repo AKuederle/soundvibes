@@ -30,7 +30,11 @@ use sv::daemon::test_support::{
 use sv::daemon::ControlEvent;
 #[cfg(feature = "test-support")]
 use sv::daemon::{DaemonConfig, DaemonDeps, DaemonOutput};
+#[cfg(feature = "test-support")]
+use sv::error::AppError;
 use sv::hotkey::{self, HotkeyConfig};
+#[cfg(feature = "test-support")]
+use sv::model::{ModelLanguage, ModelSize};
 #[cfg(feature = "test-support")]
 use sv::output::test_support::{RecordedCommand, TestRunner};
 #[cfg(feature = "test-support")]
@@ -633,6 +637,41 @@ fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn
 }
 
 #[cfg(feature = "test-support")]
+#[test]
+fn at12_daemon_status_is_acknowledged() -> Result<(), Box<dyn Error>> {
+    let runtime_dir = temp_dir("soundvibes-acceptance-runtime");
+    fs::create_dir_all(&runtime_dir)?;
+    let _runtime_guard = EnvGuard::set("XDG_RUNTIME_DIR", &runtime_dir);
+    let socket_path = sv::daemon::daemon_socket_path()?;
+    let (_socket_guard, receiver, _sender) = sv::daemon::start_socket_listener(&socket_path)?;
+
+    let client = thread::spawn(|| -> Result<(), AppError> {
+        let status = sv::daemon::send_status_command()?;
+        assert!(status.ok);
+        assert_eq!(status.state.as_deref(), Some("idle"));
+        assert_eq!(status.language.as_deref(), Some("en"));
+
+        let reload = sv::daemon::send_set_model_command(ModelSize::Tiny, ModelLanguage::En);
+        let stopped = sv::daemon::send_stop_command()?;
+        assert!(stopped.ok);
+        let reload_error = reload.expect_err("missing model reload should fail");
+        assert!(reload_error.to_string().contains("model file not found"));
+        Ok(())
+    });
+
+    let config = daemon_config();
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::new(vec!["Mic".to_string()], Vec::new())),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(Vec::new())),
+    };
+    let mut output = TestOutput::default();
+    let shutdown = AtomicBool::new(false);
+    sv::daemon::run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown)?;
+    client.join().expect("control client failed")?;
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
 fn assert_command(command: &RecordedCommand, program: &str, args: &[&str], stdin: &[u8]) {
     let expected_args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
     assert_eq!(command.program, program);
@@ -673,7 +712,7 @@ fn assert_virtual_hotkey(
 
     keyboard.emit(&[release])?;
     let event = receiver.recv_timeout(Duration::from_secs(1))?;
-    assert_eq!(event, ControlEvent::StopRecording);
+    assert!(matches!(event, ControlEvent::StopRecording));
     Ok(())
 }
 

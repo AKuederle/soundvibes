@@ -596,6 +596,8 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
         .map_err(|err| AppError::audio(err.message))?;
 
     let confirm_samples = (0.1 * config.sample_rate as f32) as usize; // 100ms
+    let mut speech_detector =
+        audio::SpeechDetector::new(config.vad_threshold, 100, config.sample_rate);
 
     println!(
         "Testing audio levels. Threshold: {:.4}",
@@ -609,7 +611,6 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
     println!("{:-<10} {:-<10} {:-<12} {:-<8}", "", "", "", "");
 
     let mut buffer = Vec::new();
-    let mut speech_samples: usize = 0;
 
     loop {
         audio::drain_samples(&mut capture, &mut buffer);
@@ -620,14 +621,7 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
 
         let rms = audio::rms_energy(&buffer);
         let above_threshold = rms >= config.vad_threshold;
-
-        if above_threshold {
-            speech_samples += buffer.len();
-        } else {
-            speech_samples = 0;
-        }
-
-        let detected = speech_samples >= confirm_samples;
+        let detected = speech_detector.process(&buffer);
         let status = if detected {
             "DETECTED"
         } else if above_threshold {
@@ -640,7 +634,7 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
             "\r{:>10.6} {:>10.4} {:>12} {:>8}",
             rms,
             config.vad_threshold,
-            format!("{}/{}", speech_samples, confirm_samples),
+            format!("{}/{}", speech_detector.speech_samples(), confirm_samples),
             status
         );
         std::io::stdout().flush().ok();

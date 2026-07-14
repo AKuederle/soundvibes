@@ -208,10 +208,8 @@ pub fn run_daemon_loop(
     let mut trailing_silence_samples: usize = 0;
     // For no-speech timeout: track when recording started and sustained speech
     let mut recording_started: Option<std::time::Instant> = None;
-    let mut speech_detected = false;
-    let mut speech_samples: usize = 0;
-    // Require 100ms of speech to count as "speech detected"
-    let speech_confirm_samples = (0.1 * config.sample_rate as f32) as usize;
+    let mut speech_detector =
+        audio::SpeechDetector::new(config.vad_threshold, 100, config.sample_rate);
     // Grace period after recording starts to ignore audio feedback pickup (500ms)
     let speech_detection_grace_ms: u64 = if config.audio_feedback { 500 } else { 0 };
     let segment_config = segment_config(config);
@@ -248,8 +246,7 @@ pub fn run_daemon_loop(
                         &mut buffer,
                         &mut trailing_silence_samples,
                         &mut recording_started,
-                        &mut speech_detected,
-                        &mut speech_samples,
+                        &mut speech_detector,
                         output,
                     )?;
                     buffer_has_leading_overlap = false;
@@ -345,15 +342,7 @@ pub fn run_daemon_loop(
                         .unwrap_or(false);
 
                     if !in_grace_period {
-                        if rms >= config.vad_threshold {
-                            speech_samples += new_samples;
-                            if speech_samples >= speech_confirm_samples {
-                                speech_detected = true;
-                            }
-                        } else {
-                            // Reset on silence (require continuous speech)
-                            speech_samples = 0;
-                        }
+                        speech_detector.process(new_audio);
                     }
 
                     if config.vad == VadMode::Continuous {
@@ -392,8 +381,7 @@ pub fn run_daemon_loop(
                                     config.vad_chunk_ms,
                                 );
                             trailing_silence_samples = 0;
-                            speech_detected = false;
-                            speech_samples = 0;
+                            speech_detector.reset();
                             recording_started = Some(std::time::Instant::now());
                         }
                     }
@@ -401,7 +389,7 @@ pub fn run_daemon_loop(
 
                 // Check for no-speech timeout
                 if config.no_speech_timeout_ms > 0
-                    && !speech_detected
+                    && !speech_detector.is_detected()
                     && recording_started
                         .map(|t| (t.elapsed().as_millis() as u64) >= config.no_speech_timeout_ms)
                         .unwrap_or(false)
@@ -456,8 +444,7 @@ fn start_active_recording(
     buffer: &mut Vec<f32>,
     trailing_silence_samples: &mut usize,
     recording_started: &mut Option<std::time::Instant>,
-    speech_detected: &mut bool,
-    speech_samples: &mut usize,
+    speech_detector: &mut audio::SpeechDetector,
     output: &mut dyn DaemonOutput,
 ) -> Result<(), AppError> {
     let new_capture = deps
@@ -473,8 +460,7 @@ fn start_active_recording(
     buffer.clear();
     *trailing_silence_samples = 0;
     *recording_started = Some(std::time::Instant::now());
-    *speech_detected = false;
-    *speech_samples = 0;
+    speech_detector.reset();
     *capture = Some(new_capture);
     output.stdout("Recording started.");
     if config.audio_feedback {
@@ -1189,20 +1175,8 @@ mod tests {
         DEFAULT_SEGMENT_TARGET_MS,
     };
 
-    #[test]
-    fn daemon_loop_emits_transcript_to_output() -> Result<(), AppError> {
-        let (sender, receiver) = control_channel();
-        let control_sender = sender.clone();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let mut output = TestOutput::default();
-        let deps = DaemonDeps {
-            audio: Box::new(TestAudioBackend::new(
-                vec!["Mic".to_string()],
-                vec![vec![0.2; 160]],
-            )),
-            transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["hello".to_string()])),
-        };
-        let config = DaemonConfig {
+    fn test_config() -> DaemonConfig {
+        DaemonConfig {
             model_path: None,
             download_model: false,
             language: "en".to_string(),
@@ -1226,7 +1200,23 @@ mod tests {
             audio_feedback: false,
             no_speech_timeout_ms: 0,
             hotkey: HotkeyConfig::default(),
+        }
+    }
+
+    #[test]
+    fn daemon_loop_emits_transcript_to_output() -> Result<(), AppError> {
+        let (sender, receiver) = control_channel();
+        let control_sender = sender.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut output = TestOutput::default();
+        let deps = DaemonDeps {
+            audio: Box::new(TestAudioBackend::new(
+                vec!["Mic".to_string()],
+                vec![vec![0.2; 160]],
+            )),
+            transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["hello".to_string()])),
         };
+        let config = test_config();
 
         let shutdown_trigger = Arc::clone(&shutdown);
         let control_thread = thread::spawn(move || {
@@ -1248,6 +1238,86 @@ mod tests {
     }
 
     #[test]
+    fn no_speech_timeout_cancels_silent_recording() -> Result<(), AppError> {
+        let (sender, receiver) = control_channel();
+        let control_sender = sender.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut output = TestOutput::default();
+        let deps = DaemonDeps {
+            audio: Box::new(TestAudioBackend::new(
+                vec!["Mic".to_string()],
+                vec![vec![0.0; 100]],
+            )),
+            transcriber_factory: Box::new(TestTranscriberFactory::new(Vec::new())),
+        };
+        let config = DaemonConfig {
+            sample_rate: 1_000,
+            no_speech_timeout_ms: 30,
+            ..test_config()
+        };
+
+        let shutdown_trigger = Arc::clone(&shutdown);
+        let control_thread = thread::spawn(move || {
+            let _ = control_sender.send(ControlEvent::StartRecording);
+            thread::sleep(Duration::from_millis(80));
+            shutdown_trigger.store(true, Ordering::Relaxed);
+        });
+
+        let result = run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown);
+        control_thread.join().expect("control thread failed");
+        result?;
+
+        assert!(output
+            .stdout_lines()
+            .iter()
+            .any(|line| line == "No speech detected, cancelled."));
+        Ok(())
+    }
+
+    #[test]
+    fn sustained_speech_prevents_no_speech_cancellation() -> Result<(), AppError> {
+        let (sender, receiver) = control_channel();
+        let control_sender = sender.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut output = TestOutput::default();
+        let deps = DaemonDeps {
+            audio: Box::new(TestAudioBackend::new(
+                vec!["Mic".to_string()],
+                vec![vec![0.2; 100]],
+            )),
+            transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["speech".to_string()])),
+        };
+        let config = DaemonConfig {
+            sample_rate: 1_000,
+            no_speech_timeout_ms: 30,
+            ..test_config()
+        };
+
+        let shutdown_trigger = Arc::clone(&shutdown);
+        let control_thread = thread::spawn(move || {
+            let _ = control_sender.send(ControlEvent::StartRecording);
+            thread::sleep(Duration::from_millis(80));
+            let _ = control_sender.send(ControlEvent::StopRecording);
+            thread::sleep(Duration::from_millis(20));
+            shutdown_trigger.store(true, Ordering::Relaxed);
+        });
+
+        let result = run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown);
+        control_thread.join().expect("control thread failed");
+        result?;
+
+        assert!(!output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("No speech detected")));
+        assert!(output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("Transcript 1: speech")));
+        Ok(())
+    }
+
+    #[test]
     fn hold_recording_continuous_mode_transcribes_on_pause_before_release() -> Result<(), AppError>
     {
         let (sender, receiver) = control_channel();
@@ -1264,29 +1334,10 @@ mod tests {
             ])),
         };
         let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
-            sample_rate: 16_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
             vad: VadMode::Continuous,
             vad_silence_ms: 20,
-            vad_threshold: 0.015,
             vad_chunk_ms: 20,
-            segment_target_ms: DEFAULT_SEGMENT_TARGET_MS,
-            segment_grace_ms: DEFAULT_SEGMENT_GRACE_MS,
-            segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
-            segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
+            ..test_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1330,29 +1381,15 @@ mod tests {
             ])),
         };
         let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
             sample_rate: 1_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
             vad: VadMode::Continuous,
             vad_silence_ms: 100,
-            vad_threshold: 0.015,
             vad_chunk_ms: 20,
             segment_target_ms: 20,
             segment_grace_ms: 20,
             segment_overlap_ms: 5,
             segment_min_ms: 10,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
+            ..test_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1403,29 +1440,15 @@ mod tests {
             ])),
         };
         let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
             sample_rate: 1_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
             vad: VadMode::Continuous,
             vad_silence_ms: 20,
-            vad_threshold: 0.015,
             vad_chunk_ms: 20,
             segment_target_ms: 20,
             segment_grace_ms: 200,
             segment_overlap_ms: 10,
             segment_min_ms: 10,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
+            ..test_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1473,29 +1496,15 @@ mod tests {
             ])),
         };
         let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
             sample_rate: 1_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
             vad: VadMode::Continuous,
             vad_silence_ms: 20,
-            vad_threshold: 0.015,
             vad_chunk_ms: 20,
             segment_target_ms: 20,
             segment_grace_ms: 200,
             segment_overlap_ms: 5,
             segment_min_ms: 10,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
+            ..test_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1557,31 +1566,7 @@ mod tests {
                 load_count: Arc::new(AtomicUsize::new(0)),
             }),
         };
-        let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
-            sample_rate: 16_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
-            vad: VadMode::Off,
-            vad_silence_ms: 800,
-            vad_threshold: 0.015,
-            vad_chunk_ms: 250,
-            segment_target_ms: DEFAULT_SEGMENT_TARGET_MS,
-            segment_grace_ms: DEFAULT_SEGMENT_GRACE_MS,
-            segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
-            segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
-        };
+        let config = test_config();
 
         let shutdown_trigger = Arc::clone(&shutdown);
         let control_thread = thread::spawn(move || {

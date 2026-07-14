@@ -365,51 +365,6 @@ impl SpeechDetector {
     pub fn speech_samples(&self) -> usize {
         self.speech_samples
     }
-
-    /// Get the RMS of samples (for debugging)
-    pub fn analyze(&self, samples: &[f32]) -> SpeechAnalysis {
-        let rms = rms_energy(samples);
-        SpeechAnalysis {
-            rms,
-            threshold: self.threshold,
-            above_threshold: rms >= self.threshold,
-            samples_len: samples.len(),
-            accumulated_speech_samples: self.speech_samples,
-            confirm_samples_needed: self.confirm_samples,
-            detected: self.detected,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct SpeechAnalysis {
-    pub rms: f32,
-    pub threshold: f32,
-    pub above_threshold: bool,
-    pub samples_len: usize,
-    pub accumulated_speech_samples: usize,
-    pub confirm_samples_needed: usize,
-    pub detected: bool,
-}
-
-impl std::fmt::Display for SpeechAnalysis {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "RMS: {:.6} (threshold: {:.6}, {}), samples: {}, accumulated: {}/{}, detected: {}",
-            self.rms,
-            self.threshold,
-            if self.above_threshold {
-                "ABOVE"
-            } else {
-                "below"
-            },
-            self.samples_len,
-            self.accumulated_speech_samples,
-            self.confirm_samples_needed,
-            self.detected
-        )
-    }
 }
 
 fn duration_to_samples(sample_rate: u32, duration: Duration) -> usize {

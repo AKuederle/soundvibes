@@ -1,4 +1,5 @@
 use chrono::{Local, Utc};
+use clap::ValueEnum;
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::env;
@@ -304,8 +305,7 @@ pub fn run_daemon_loop(
                                 worker.reload(new_transcriber)?;
                                 output.stdout(&format!(
                                     "Model reloaded: size={}, model-language={}",
-                                    model_size_token(size),
-                                    model_language_token(model_language)
+                                    size, model_language
                                 ));
                             }
                             Err(err) => {
@@ -836,14 +836,14 @@ fn parse_set_model_command(command: &str) -> Result<(ModelSize, ModelLanguage), 
     let mut model_language = None;
     for token in command.split_whitespace().skip(1) {
         if let Some(value) = token.strip_prefix("size=") {
-            size = Some(parse_model_size(value).ok_or_else(|| {
+            size = Some(ModelSize::from_str(value, true).map_err(|_| {
                 format!("invalid model size '{value}' (expected auto|tiny|base|small|medium|large|large-v3-turbo)")
             })?);
         } else if let Some(value) = token.strip_prefix("model-language=") {
-            model_language =
-                Some(parse_model_language(value).ok_or_else(|| {
-                    format!("invalid model language '{value}' (expected auto|en)")
-                })?);
+            model_language = Some(
+                ModelLanguage::from_str(value, true)
+                    .map_err(|_| format!("invalid model language '{value}' (expected auto|en)"))?,
+            );
         }
     }
 
@@ -851,27 +851,6 @@ fn parse_set_model_command(command: &str) -> Result<(ModelSize, ModelLanguage), 
     let model_language =
         model_language.ok_or_else(|| "missing model-language=<LANG>".to_string())?;
     Ok((size, model_language))
-}
-
-fn parse_model_size(value: &str) -> Option<ModelSize> {
-    match value {
-        "auto" => Some(ModelSize::Auto),
-        "tiny" => Some(ModelSize::Tiny),
-        "base" => Some(ModelSize::Base),
-        "small" => Some(ModelSize::Small),
-        "medium" => Some(ModelSize::Medium),
-        "large" => Some(ModelSize::Large),
-        "large-v3-turbo" => Some(ModelSize::LargeV3Turbo),
-        _ => None,
-    }
-}
-
-fn parse_model_language(value: &str) -> Option<ModelLanguage> {
-    match value {
-        "auto" => Some(ModelLanguage::Auto),
-        "en" => Some(ModelLanguage::En),
-        _ => None,
-    }
 }
 
 pub fn send_record_start_command() -> Result<(), AppError> {
@@ -890,11 +869,7 @@ pub fn send_set_model_command(
     size: ModelSize,
     model_language: ModelLanguage,
 ) -> Result<(), AppError> {
-    let command = format!(
-        "set-model size={} model-language={}",
-        model_size_token(size),
-        model_language_token(model_language)
-    );
+    let command = format!("set-model size={} model-language={}", size, model_language);
     send_daemon_command(&command)
 }
 
@@ -917,25 +892,6 @@ fn send_daemon_command(command: &str) -> Result<(), AppError> {
         .write_all(payload.as_bytes())
         .map_err(|err| AppError::runtime(format!("failed to send {command}: {err}")))?;
     Ok(())
-}
-
-fn model_size_token(size: ModelSize) -> &'static str {
-    match size {
-        ModelSize::Auto => "auto",
-        ModelSize::Tiny => "tiny",
-        ModelSize::Base => "base",
-        ModelSize::Small => "small",
-        ModelSize::Medium => "medium",
-        ModelSize::Large => "large",
-        ModelSize::LargeV3Turbo => "large-v3-turbo",
-    }
-}
-
-fn model_language_token(model_language: ModelLanguage) -> &'static str {
-    match model_language {
-        ModelLanguage::Auto => "auto",
-        ModelLanguage::En => "en",
-    }
 }
 
 struct CpalAudioBackend;

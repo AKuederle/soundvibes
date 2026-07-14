@@ -1,6 +1,7 @@
 use clap::ValueEnum;
 use serde::Deserialize;
 use std::env;
+use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -30,17 +31,12 @@ impl ModelSize {
             other => other,
         }
     }
+}
 
-    fn as_str(self) -> &'static str {
-        match self {
-            ModelSize::Auto => "small",
-            ModelSize::Tiny => "tiny",
-            ModelSize::Base => "base",
-            ModelSize::Small => "small",
-            ModelSize::Medium => "medium",
-            ModelSize::Large => "large",
-            ModelSize::LargeV3Turbo => "large-v3-turbo",
-        }
+impl fmt::Display for ModelSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = self.to_possible_value().ok_or(fmt::Error)?;
+        f.write_str(value.get_name())
     }
 }
 
@@ -49,6 +45,13 @@ impl ModelSize {
 pub enum ModelLanguage {
     Auto,
     En,
+}
+
+impl fmt::Display for ModelLanguage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = self.to_possible_value().ok_or(fmt::Error)?;
+        f.write_str(value.get_name())
+    }
 }
 
 pub fn model_language_for_transcription(language: &str) -> ModelLanguage {
@@ -73,7 +76,7 @@ impl ModelSpec {
     }
 
     pub fn filename_result(&self) -> Result<String, AppError> {
-        let size = self.size.resolved().as_str();
+        let size = self.size.resolved();
         match self.language {
             ModelLanguage::Auto => Ok(format!("ggml-{size}.bin")),
             ModelLanguage::En if self.size.resolved() == ModelSize::LargeV3Turbo => {
@@ -83,11 +86,6 @@ impl ModelSpec {
             }
             ModelLanguage::En => Ok(format!("ggml-{size}.en.bin")),
         }
-    }
-
-    pub fn filename(&self) -> String {
-        self.filename_result()
-            .expect("invalid model spec for filename")
     }
 }
 
@@ -115,12 +113,6 @@ pub fn resolve_model_path_result(
         Some(path) => Ok(path.to_path_buf()),
         None => Ok(default_model_dir().join(spec.filename_result()?)),
     }
-}
-
-pub fn resolve_model_path(explicit_path: Option<&Path>, spec: &ModelSpec) -> PathBuf {
-    explicit_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| default_model_dir().join(spec.filename()))
 }
 
 pub fn default_model_dir() -> PathBuf {
@@ -224,7 +216,10 @@ mod tests {
     fn large_v3_turbo_uses_whisper_cpp_turbo_filename() {
         let spec = ModelSpec::new(ModelSize::LargeV3Turbo, ModelLanguage::Auto);
 
-        assert_eq!(spec.filename(), "ggml-large-v3-turbo.bin");
+        assert_eq!(
+            spec.filename_result().expect("valid model filename"),
+            "ggml-large-v3-turbo.bin"
+        );
     }
 
     #[test]

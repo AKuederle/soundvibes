@@ -126,9 +126,9 @@ fn at01b_language_selects_model_variant() -> Result<(), Box<dyn Error>> {
         sv::model::ModelLanguage::Auto,
     );
 
-    assert!(english_spec.filename().contains(".en."));
-    assert!(!auto_spec.filename().contains(".en."));
-    assert_eq!(turbo_spec.filename(), "ggml-large-v3-turbo.bin");
+    assert!(english_spec.filename_result()?.contains(".en."));
+    assert!(!auto_spec.filename_result()?.contains(".en."));
+    assert_eq!(turbo_spec.filename_result()?, "ggml-large-v3-turbo.bin");
     Ok(())
 }
 

@@ -38,6 +38,36 @@ use sv::output::{OutputConfig, OutputMode};
 #[cfg(feature = "test-support")]
 use sv::types::{AudioHost, OutputFormat, VadMode};
 
+#[cfg(feature = "test-support")]
+fn daemon_config() -> DaemonConfig {
+    DaemonConfig {
+        model_path: None,
+        download_model: false,
+        language: "en".to_string(),
+        device: None,
+        audio_host: AudioHost::Default,
+        sample_rate: 16_000,
+        format: OutputFormat::Plain,
+        output: OutputConfig {
+            mode: OutputMode::Stdout,
+            ..OutputConfig::default()
+        },
+        vad: VadMode::Off,
+        vad_silence_ms: 800,
+        vad_threshold: 0.015,
+        vad_chunk_ms: 250,
+        segment_target_ms: sv::segmentation::DEFAULT_SEGMENT_TARGET_MS,
+        segment_grace_ms: sv::segmentation::DEFAULT_SEGMENT_GRACE_MS,
+        segment_overlap_ms: sv::segmentation::DEFAULT_SEGMENT_OVERLAP_MS,
+        segment_min_ms: sv::segmentation::DEFAULT_SEGMENT_MIN_MS,
+        debug_audio: false,
+        dump_audio: false,
+        audio_feedback: false,
+        no_speech_timeout_ms: 0,
+        hotkey: HotkeyConfig::default(),
+    }
+}
+
 #[test]
 fn at01_daemon_starts_with_valid_model() -> Result<(), Box<dyn Error>> {
     if env::var("SV_HARDWARE_TESTS").ok().as_deref() != Some("1") {
@@ -219,32 +249,7 @@ fn at04_daemon_hold_key_captures_and_transcribes() -> Result<(), Box<dyn Error>>
         )),
         transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["hello".to_string()])),
     };
-    let config = DaemonConfig {
-        model_path: None,
-        download_model: false,
-        language: "en".to_string(),
-        device: None,
-        audio_host: AudioHost::Default,
-        sample_rate: 16_000,
-        format: OutputFormat::Plain,
-        output: OutputConfig {
-            mode: OutputMode::Stdout,
-            ..OutputConfig::default()
-        },
-        vad: VadMode::Off,
-        vad_silence_ms: 800,
-        vad_threshold: 0.015,
-        vad_chunk_ms: 250,
-        segment_target_ms: sv::segmentation::DEFAULT_SEGMENT_TARGET_MS,
-        segment_grace_ms: sv::segmentation::DEFAULT_SEGMENT_GRACE_MS,
-        segment_overlap_ms: sv::segmentation::DEFAULT_SEGMENT_OVERLAP_MS,
-        segment_min_ms: sv::segmentation::DEFAULT_SEGMENT_MIN_MS,
-        debug_audio: false,
-        dump_audio: false,
-        audio_feedback: false,
-        no_speech_timeout_ms: 0,
-        hotkey: HotkeyConfig::default(),
-    };
+    let config = daemon_config();
 
     let shutdown_trigger = Arc::clone(&shutdown);
     let control_thread = thread::spawn(move || {
@@ -279,30 +284,8 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
         transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["hello".to_string()])),
     };
     let config = DaemonConfig {
-        model_path: None,
-        download_model: false,
-        language: "en".to_string(),
-        device: None,
-        audio_host: AudioHost::Default,
-        sample_rate: 16_000,
         format: OutputFormat::Jsonl,
-        output: OutputConfig {
-            mode: OutputMode::Stdout,
-            ..OutputConfig::default()
-        },
-        vad: VadMode::Off,
-        vad_silence_ms: 800,
-        vad_threshold: 0.015,
-        vad_chunk_ms: 250,
-        segment_target_ms: sv::segmentation::DEFAULT_SEGMENT_TARGET_MS,
-        segment_grace_ms: sv::segmentation::DEFAULT_SEGMENT_GRACE_MS,
-        segment_overlap_ms: sv::segmentation::DEFAULT_SEGMENT_OVERLAP_MS,
-        segment_min_ms: sv::segmentation::DEFAULT_SEGMENT_MIN_MS,
-        debug_audio: false,
-        dump_audio: false,
-        audio_feedback: false,
-        no_speech_timeout_ms: 0,
-        hotkey: HotkeyConfig::default(),
+        ..daemon_config()
     };
 
     let shutdown_trigger = Arc::clone(&shutdown);
@@ -352,30 +335,11 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
         ])),
     };
     let config = DaemonConfig {
-        model_path: None,
-        download_model: false,
-        language: "en".to_string(),
-        device: None,
-        audio_host: AudioHost::Default,
-        sample_rate: 16_000,
-        format: OutputFormat::Plain,
-        output: OutputConfig {
-            mode: OutputMode::Stdout,
-            ..OutputConfig::default()
-        },
         vad: VadMode::Continuous,
         vad_silence_ms: 20,
-        vad_threshold: 0.015,
         vad_chunk_ms: 10,
-        segment_target_ms: sv::segmentation::DEFAULT_SEGMENT_TARGET_MS,
-        segment_grace_ms: sv::segmentation::DEFAULT_SEGMENT_GRACE_MS,
-        segment_overlap_ms: sv::segmentation::DEFAULT_SEGMENT_OVERLAP_MS,
         segment_min_ms: 5,
-        debug_audio: false,
-        dump_audio: false,
-        audio_feedback: false,
-        no_speech_timeout_ms: 0,
-        hotkey: HotkeyConfig::default(),
+        ..daemon_config()
     };
 
     let shutdown_trigger = Arc::clone(&shutdown);
@@ -430,30 +394,15 @@ fn at05b_continuous_long_speech_transcribes_before_release() -> Result<(), Box<d
         ])),
     };
     let config = DaemonConfig {
-        model_path: None,
-        download_model: false,
-        language: "en".to_string(),
-        device: None,
-        audio_host: AudioHost::Default,
         sample_rate: 1_000,
-        format: OutputFormat::Plain,
-        output: OutputConfig {
-            mode: OutputMode::Stdout,
-            ..OutputConfig::default()
-        },
         vad: VadMode::Continuous,
         vad_silence_ms: 100,
-        vad_threshold: 0.015,
         vad_chunk_ms: 20,
         segment_target_ms: 20,
         segment_grace_ms: 20,
         segment_overlap_ms: 5,
         segment_min_ms: 10,
-        debug_audio: false,
-        dump_audio: false,
-        audio_feedback: false,
-        no_speech_timeout_ms: 0,
-        hotkey: HotkeyConfig::default(),
+        ..daemon_config()
     };
 
     let shutdown_trigger = Arc::clone(&shutdown);

@@ -415,49 +415,43 @@ impl KeyName {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use std::os::unix::process::ExitStatusExt;
 
-    #[derive(Debug, Clone)]
-    struct RecordedCommand {
-        program: String,
-        args: Vec<String>,
-        stdin: Vec<u8>,
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RecordedCommand {
+        pub program: String,
+        pub args: Vec<String>,
+        pub stdin: Vec<u8>,
     }
 
     #[derive(Default)]
-    struct FakeRunner {
-        commands: Vec<RecordedCommand>,
+    pub struct TestRunner {
+        pub commands: Vec<RecordedCommand>,
+        pub sleeps: Vec<Duration>,
         outputs: Vec<Output>,
         statuses: Vec<std::process::ExitStatus>,
-        sleeps: Vec<Duration>,
     }
 
-    impl FakeRunner {
-        fn push_output(&mut self, stdout: &[u8]) {
+    impl TestRunner {
+        pub fn push_output(&mut self, status: i32, stdout: &[u8], stderr: &[u8]) {
             self.outputs.push(Output {
-                status: std::process::ExitStatus::from_raw(0),
+                status: std::process::ExitStatus::from_raw(status << 8),
                 stdout: stdout.to_vec(),
-                stderr: Vec::new(),
-            });
-        }
-
-        fn push_failed_output(&mut self, stderr: &[u8]) {
-            self.outputs.push(Output {
-                status: std::process::ExitStatus::from_raw(1 << 8),
-                stdout: Vec::new(),
                 stderr: stderr.to_vec(),
             });
         }
 
-        fn push_status_success(&mut self) {
-            self.statuses.push(std::process::ExitStatus::from_raw(0));
+        pub fn push_status(&mut self, status: i32) {
+            self.statuses
+                .push(std::process::ExitStatus::from_raw(status << 8));
         }
     }
 
-    impl CommandRunner for FakeRunner {
+    impl CommandRunner for TestRunner {
         fn output(&mut self, program: &str, args: &[String]) -> Result<Output, std::io::Error> {
             self.commands.push(RecordedCommand {
                 program: program.to_string(),
@@ -494,6 +488,12 @@ mod tests {
             self.sleeps.push(duration);
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::TestRunner;
+    use super::*;
 
     struct EnvGuard {
         key: &'static str,
@@ -520,11 +520,11 @@ mod tests {
     #[test]
     fn paste_mode_clears_clipboard_when_it_started_empty() {
         let _guard = EnvGuard::set("WAYLAND_DISPLAY", "wayland-0");
-        let mut runner = FakeRunner::default();
-        runner.push_failed_output(b"nothing is copied");
-        runner.push_status_success();
-        runner.push_output(b"");
-        runner.push_status_success();
+        let mut runner = TestRunner::default();
+        runner.push_output(1, b"", b"nothing is copied");
+        runner.push_status(0);
+        runner.push_output(0, b"", b"");
+        runner.push_status(0);
 
         output_text_with_runner("new text", &OutputConfig::default(), &mut runner)
             .expect("paste should succeed");
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn paste_mode_rejects_invalid_paste_keys_before_changing_clipboard() {
-        let mut runner = FakeRunner::default();
+        let mut runner = TestRunner::default();
         let config = OutputConfig {
             paste_keys: "ctrl+".to_string(),
             ..OutputConfig::default()
@@ -556,13 +556,11 @@ mod tests {
     #[test]
     fn paste_mode_restores_clipboard_after_paste_key_failure() {
         let _guard = EnvGuard::set("WAYLAND_DISPLAY", "wayland-0");
-        let mut runner = FakeRunner::default();
-        runner.push_output(b"text/plain\n");
-        runner.push_output(b"old");
-        runner
-            .statuses
-            .push(std::process::ExitStatus::from_raw(1 << 8));
-        runner.push_status_success();
+        let mut runner = TestRunner::default();
+        runner.push_output(0, b"text/plain\n", b"");
+        runner.push_output(0, b"old", b"");
+        runner.push_status(1);
+        runner.push_status(0);
 
         let err = output_text_with_runner("new text", &OutputConfig::default(), &mut runner)
             .expect_err("paste key failure should be reported");
@@ -577,12 +575,12 @@ mod tests {
     #[test]
     fn paste_mode_restores_original_clipboard_with_mime_type() {
         let _guard = EnvGuard::set("WAYLAND_DISPLAY", "wayland-0");
-        let mut runner = FakeRunner::default();
-        runner.push_output(b"text/html\ntext/plain\n");
-        runner.push_output(b"<b>old</b>");
-        runner.push_status_success();
-        runner.push_output(b"");
-        runner.push_status_success();
+        let mut runner = TestRunner::default();
+        runner.push_output(0, b"text/html\ntext/plain\n", b"");
+        runner.push_output(0, b"<b>old</b>", b"");
+        runner.push_status(0);
+        runner.push_output(0, b"", b"");
+        runner.push_status(0);
 
         output_text_with_runner("new text", &OutputConfig::default(), &mut runner)
             .expect("paste should succeed");
@@ -613,8 +611,8 @@ mod tests {
 
     #[test]
     fn type_mode_uses_dotool_without_wtype_fallback() {
-        let mut runner = FakeRunner::default();
-        runner.push_status_success();
+        let mut runner = TestRunner::default();
+        runner.push_status(0);
         let config = OutputConfig {
             mode: OutputMode::Type,
             ..OutputConfig::default()
@@ -634,8 +632,8 @@ mod tests {
 
     #[test]
     fn type_mode_splits_multiline_text_into_safe_dotool_commands() {
-        let mut runner = FakeRunner::default();
-        runner.push_status_success();
+        let mut runner = TestRunner::default();
+        runner.push_status(0);
         let config = OutputConfig {
             mode: OutputMode::Type,
             ..OutputConfig::default()

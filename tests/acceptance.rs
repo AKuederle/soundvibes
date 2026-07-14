@@ -16,10 +16,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "test-support")]
-use std::os::unix::process::ExitStatusExt;
-#[cfg(feature = "test-support")]
-use std::process::{ExitStatus, Output};
-#[cfg(feature = "test-support")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "test-support")]
@@ -33,6 +29,8 @@ use sv::daemon::test_support::{
 use sv::daemon::{DaemonConfig, DaemonDeps, DaemonOutput};
 #[cfg(feature = "test-support")]
 use sv::hotkey::HotkeyConfig;
+#[cfg(feature = "test-support")]
+use sv::output::test_support::{RecordedCommand, TestRunner};
 #[cfg(feature = "test-support")]
 use sv::output::{OutputConfig, OutputMode};
 #[cfg(feature = "test-support")]
@@ -587,9 +585,9 @@ fn at07_cpu_fallback() -> Result<(), Box<dyn Error>> {
 #[test]
 fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn Error>> {
     let _wayland_guard = EnvGuard::set("WAYLAND_DISPLAY", "wayland-0");
-    let mut runner = AcceptanceRunner::default();
-    runner.push_output(0, b"text/html\ntext/plain\n");
-    runner.push_output(0, b"<b>old</b>");
+    let mut runner = TestRunner::default();
+    runner.push_output(0, b"text/html\ntext/plain\n", b"");
+    runner.push_output(0, b"<b>old</b>", b"");
     runner.push_status(0);
     runner.push_status(0);
 
@@ -629,81 +627,7 @@ fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn
 }
 
 #[cfg(feature = "test-support")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AcceptanceCommand {
-    program: String,
-    args: Vec<String>,
-    stdin: Vec<u8>,
-}
-
-#[cfg(feature = "test-support")]
-#[derive(Default)]
-struct AcceptanceRunner {
-    commands: Vec<AcceptanceCommand>,
-    outputs: Vec<Output>,
-    statuses: Vec<ExitStatus>,
-    sleeps: Vec<Duration>,
-}
-
-#[cfg(feature = "test-support")]
-impl AcceptanceRunner {
-    fn push_output(&mut self, status: i32, stdout: &[u8]) {
-        self.outputs.push(Output {
-            status: ExitStatus::from_raw(status),
-            stdout: stdout.to_vec(),
-            stderr: Vec::new(),
-        });
-    }
-
-    fn push_status(&mut self, status: i32) {
-        self.statuses.push(ExitStatus::from_raw(status));
-    }
-}
-
-#[cfg(feature = "test-support")]
-impl sv::output::CommandRunner for AcceptanceRunner {
-    fn output(&mut self, program: &str, args: &[String]) -> Result<Output, std::io::Error> {
-        self.commands.push(AcceptanceCommand {
-            program: program.to_string(),
-            args: args.to_vec(),
-            stdin: Vec::new(),
-        });
-        Ok(self.outputs.remove(0))
-    }
-
-    fn status_with_stdin(
-        &mut self,
-        program: &str,
-        args: &[String],
-        stdin: &[u8],
-    ) -> Result<ExitStatus, std::io::Error> {
-        self.commands.push(AcceptanceCommand {
-            program: program.to_string(),
-            args: args.to_vec(),
-            stdin: stdin.to_vec(),
-        });
-        Ok(self.statuses.remove(0))
-    }
-
-    fn copy_temporary_text(&mut self, text: &str) -> Result<(), sv::output::OutputError> {
-        self.commands.push(AcceptanceCommand {
-            program: "temporary-clipboard-copy".to_string(),
-            args: vec![
-                "text/plain".to_string(),
-                "x-kde-passwordManagerHint".to_string(),
-            ],
-            stdin: text.as_bytes().to_vec(),
-        });
-        Ok(())
-    }
-
-    fn sleep(&mut self, duration: Duration) {
-        self.sleeps.push(duration);
-    }
-}
-
-#[cfg(feature = "test-support")]
-fn assert_command(command: &AcceptanceCommand, program: &str, args: &[&str], stdin: &[u8]) {
+fn assert_command(command: &RecordedCommand, program: &str, args: &[&str], stdin: &[u8]) {
     let expected_args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
     assert_eq!(command.program, program);
     assert_eq!(command.args, expected_args);

@@ -15,7 +15,7 @@ use sv::segmentation::{
     DEFAULT_SEGMENT_GRACE_MS, DEFAULT_SEGMENT_MIN_MS, DEFAULT_SEGMENT_OVERLAP_MS,
     DEFAULT_SEGMENT_TARGET_MS,
 };
-use sv::types::{AudioHost, OutputFormat, VadMode, VadSetting};
+use sv::types::{AudioHost, OutputFormat, VadMode};
 
 #[derive(Parser, Debug)]
 #[command(name = "sv", version, about = "Offline speech-to-text CLI")]
@@ -275,7 +275,7 @@ impl Config {
             ),
         };
 
-        let vad = sources.value("vad", cli.vad, file.vad.map(VadSetting::into_mode));
+        let vad = sources.value("vad", cli.vad, file.vad);
         let vad_silence_ms =
             sources.value("vad_silence_ms", cli.vad_silence_ms, file.vad_silence_ms);
         let vad_threshold = sources.value("vad_threshold", cli.vad_threshold, file.vad_threshold);
@@ -366,7 +366,7 @@ struct FileConfig {
     sample_rate: Option<u32>,
     format: Option<OutputFormat>,
     output: Option<OutputConfig>,
-    vad: Option<VadSetting>,
+    vad: Option<VadMode>,
     vad_silence_ms: Option<u64>,
     vad_threshold: Option<f32>,
     vad_chunk_ms: Option<u64>,
@@ -832,6 +832,7 @@ mod tests {
             segment_grace_ms = 1500
             segment_overlap_ms = 300
             segment_min_ms = 900
+            vad = "continuous"
             "#,
         )
         .expect("config should parse");
@@ -854,5 +855,6 @@ mod tests {
         assert_eq!(config.daemon.segment_grace_ms, 1500);
         assert_eq!(config.daemon.segment_overlap_ms, 250);
         assert_eq!(config.daemon.segment_min_ms, 900);
+        assert_eq!(config.daemon.vad, VadMode::Continuous);
     }
 }

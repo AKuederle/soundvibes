@@ -58,6 +58,13 @@ These tests validate the product behavior for the offline Linux CLI.
 - Expect: final transcript is printed after key release.
 - Pass: final output appears shortly after release.
 
+### AT-04a: Hotkey keyboard reconnect
+- Setup: set `SV_HARDWARE_TESTS=1` on Linux with writable `/dev/uinput` and readable `/dev/input/event*` devices.
+- Command: `cargo test --test acceptance at04a_hotkey_keyboard_reconnects_without_listener_restart`.
+- Action: the test creates a virtual keyboard, verifies its hold key, removes it, creates a replacement, and verifies the replacement without restarting the listener.
+- Expect: both virtual keyboards produce start and stop control events.
+- Pass: the replacement keyboard is active within the test timeout; the test skips gracefully when `/dev/uinput` is unavailable.
+
 ### AT-05: JSONL output format
 - Setup: set `format` in config to `"jsonl"`.
 - Command: `sv daemon start` with a configured hold key.

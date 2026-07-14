@@ -218,12 +218,12 @@ pub fn start_listener(
             }
 
             if monitor_changed || last_reconcile.elapsed() >= RECONCILE_INTERVAL {
+                last_reconcile = Instant::now();
                 match reconcile_devices(&mut devices, input_dir) {
                     Ok(event) => {
                         if !send_transition(&sender, event) {
                             return;
                         }
-                        last_reconcile = Instant::now();
                     }
                     Err(err) => eprintln!("hotkey device reconciliation error: {err}"),
                 }

@@ -1,5 +1,10 @@
 // Automated acceptance tests for docs/acceptance-tests.md.
 // Keep AT-xx mappings in sync with the documentation.
+use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
+use evdev::{AttributeSet, EventType, InputEvent, Key};
+#[cfg(feature = "test-support")]
+use serde_json::Value;
+
 use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -19,14 +24,13 @@ use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "test-support")]
-use serde_json::Value;
-
-#[cfg(feature = "test-support")]
 use sv::daemon::test_support::{
     daemon_config, TestAudioBackend, TestOutput, TestTranscriberFactory,
 };
+use sv::daemon::ControlEvent;
 #[cfg(feature = "test-support")]
 use sv::daemon::{DaemonConfig, DaemonDeps, DaemonOutput};
+use sv::hotkey::{self, HotkeyConfig};
 #[cfg(feature = "test-support")]
 use sv::output::test_support::{RecordedCommand, TestRunner};
 #[cfg(feature = "test-support")]
@@ -198,6 +202,40 @@ fn at03_invalid_input_device_returns_exit_code_3() -> Result<(), Box<dyn Error>>
         stderr.contains("input device not found"),
         "expected device error, got: {stderr}"
     );
+    Ok(())
+}
+
+#[test]
+fn at04a_hotkey_keyboard_reconnects_without_listener_restart() -> Result<(), Box<dyn Error>> {
+    if env::var("SV_HARDWARE_TESTS").ok().as_deref() != Some("1") {
+        eprintln!("Skipping AT-04a; set SV_HARDWARE_TESTS=1 to run.");
+        return Ok(());
+    }
+
+    let Ok(mut keyboard) = virtual_keyboard() else {
+        eprintln!("Skipping AT-04a; /dev/uinput is not writable.");
+        return Ok(());
+    };
+    keyboard
+        .enumerate_dev_nodes_blocking()?
+        .next()
+        .transpose()?;
+
+    let (sender, receiver) = mpsc::channel();
+    let config = HotkeyConfig {
+        enabled: true,
+        key: Some("RIGHTCTRL".to_string()),
+    };
+    let _listener = hotkey::start_listener(&config, sender)?;
+    assert_virtual_hotkey(&mut keyboard, &receiver)?;
+
+    drop(keyboard);
+    let mut replacement = virtual_keyboard()?;
+    replacement
+        .enumerate_dev_nodes_blocking()?
+        .next()
+        .transpose()?;
+    assert_virtual_hotkey(&mut replacement, &receiver)?;
     Ok(())
 }
 
@@ -600,6 +638,43 @@ fn assert_command(command: &RecordedCommand, program: &str, args: &[&str], stdin
     assert_eq!(command.program, program);
     assert_eq!(command.args, expected_args);
     assert_eq!(command.stdin, stdin);
+}
+
+fn virtual_keyboard() -> std::io::Result<VirtualDevice> {
+    let mut keys = AttributeSet::<Key>::new();
+    for key in [Key::KEY_A, Key::KEY_Z, Key::KEY_ENTER, Key::KEY_RIGHTCTRL] {
+        keys.insert(key);
+    }
+    VirtualDeviceBuilder::new()?
+        .name("SoundVibes reconnect acceptance keyboard")
+        .with_keys(&keys)?
+        .build()
+}
+
+fn assert_virtual_hotkey(
+    keyboard: &mut VirtualDevice,
+    receiver: &mpsc::Receiver<ControlEvent>,
+) -> Result<(), Box<dyn Error>> {
+    let press = InputEvent::new(EventType::KEY, Key::KEY_RIGHTCTRL.code(), 1);
+    let release = InputEvent::new(EventType::KEY, Key::KEY_RIGHTCTRL.code(), 0);
+    let deadline = Instant::now() + Duration::from_secs(3);
+
+    loop {
+        keyboard.emit(&[press])?;
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(ControlEvent::StartRecording) => break,
+            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {
+                keyboard.emit(&[release])?;
+            }
+            Ok(event) => return Err(format!("unexpected hotkey event: {event:?}").into()),
+            Err(err) => return Err(format!("hotkey press was not received: {err}").into()),
+        }
+    }
+
+    keyboard.emit(&[release])?;
+    let event = receiver.recv_timeout(Duration::from_secs(1))?;
+    assert_eq!(event, ControlEvent::StopRecording);
+    Ok(())
 }
 
 fn model_path() -> Result<PathBuf, Box<dyn Error>> {

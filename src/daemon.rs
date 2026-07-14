@@ -1,7 +1,6 @@
 use chrono::{Local, Utc};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::flag;
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -20,7 +19,9 @@ use crate::hotkey::{self, HotkeyConfig};
 use crate::model::{self, ModelLanguage, ModelSize, ModelSpec};
 use crate::output::{self, OutputConfig, OutputMode};
 use crate::segmentation::{self, CutReason, SegmentConfig, SegmentDecision};
-use crate::transcription_worker::{TranscriptionJob, TranscriptionResult, TranscriptionWorker};
+use crate::transcription_worker::{
+    Transcriber, TranscriptionJob, TranscriptionResult, TranscriptionWorker,
+};
 use crate::types::{AudioHost, OutputFormat, VadMode};
 use crate::whisper::WhisperContext;
 
@@ -80,10 +81,6 @@ pub trait AudioBackend {
         device_name: Option<&str>,
         sample_rate: u32,
     ) -> Result<Box<dyn CaptureSource>, audio::AudioError>;
-}
-
-pub trait Transcriber: Send {
-    fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String, AppError>;
 }
 
 pub trait TranscriberFactory {
@@ -204,10 +201,6 @@ pub fn run_daemon_loop(
 
     let mut recording = false;
     let mut buffer = Vec::new();
-    let mut next_job_index = 1u64;
-    let mut next_emit_index = 1u64;
-    let mut pending_jobs = 0usize;
-    let mut pending_results = BTreeMap::new();
     let mut last_emitted_transcript = String::new();
     let mut capture: Option<Box<dyn CaptureSource>> = None;
     let mut buffer_has_leading_overlap = false;
@@ -224,39 +217,21 @@ pub fn run_daemon_loop(
     let segment_config = segment_config(config);
 
     loop {
-        drain_worker_results(
-            &worker,
-            config,
-            output,
-            &mut pending_results,
-            &mut next_emit_index,
-            &mut pending_jobs,
-            &mut last_emitted_transcript,
-        );
+        drain_worker_results(&mut worker, config, output, &mut last_emitted_transcript);
 
         if shutdown.load(Ordering::Relaxed) {
             if recording {
                 stop_recording(
-                    &worker,
+                    &mut worker,
                     config,
                     &vad,
                     &mut capture,
                     &mut buffer,
                     buffer_has_leading_overlap,
-                    &mut next_job_index,
-                    &mut pending_jobs,
                     output,
                 )?;
             }
-            wait_for_pending_results(
-                &worker,
-                config,
-                output,
-                &mut pending_results,
-                &mut next_emit_index,
-                &mut pending_jobs,
-                &mut last_emitted_transcript,
-            );
+            wait_for_pending_results(&mut worker, config, output, &mut last_emitted_transcript);
             worker.shutdown()?;
             output.stdout("Daemon shutting down.");
             break;
@@ -283,25 +258,20 @@ pub fn run_daemon_loop(
             Ok(ControlEvent::StopRecording) => {
                 if recording {
                     stop_active_recording(
-                        &worker,
+                        &mut worker,
                         config,
                         &vad,
                         &mut recording,
                         &mut capture,
                         &mut buffer,
                         buffer_has_leading_overlap,
-                        &mut next_job_index,
-                        &mut pending_jobs,
                         output,
                     )?;
                     buffer_has_leading_overlap = false;
                     wait_for_pending_results(
-                        &worker,
+                        &mut worker,
                         config,
                         output,
-                        &mut pending_results,
-                        &mut next_emit_index,
-                        &mut pending_jobs,
                         &mut last_emitted_transcript,
                     );
                     output.stdout("Ready for next utterance.");
@@ -324,15 +294,7 @@ pub fn run_daemon_loop(
                     buffer_has_leading_overlap = false;
                     output.stdout("Recording stopped for model reload.");
                 }
-                wait_for_pending_results(
-                    &worker,
-                    config,
-                    output,
-                    &mut pending_results,
-                    &mut next_emit_index,
-                    &mut pending_jobs,
-                    &mut last_emitted_transcript,
-                );
+                wait_for_pending_results(&mut worker, config, output, &mut last_emitted_transcript);
                 let spec = ModelSpec::new(size, model_language);
                 match model::prepare_model(None, &spec, config.download_model) {
                     Ok(prepared) => {
@@ -342,11 +304,7 @@ pub fn run_daemon_loop(
                         let new_path = prepared.path.clone();
                         match deps.transcriber_factory.load(Some(&new_path)) {
                             Ok(new_transcriber) => {
-                                let mut old_worker = std::mem::replace(
-                                    &mut worker,
-                                    TranscriptionWorker::start(new_transcriber),
-                                );
-                                old_worker.shutdown()?;
+                                worker.reload(new_transcriber)?;
                                 output.stdout(&format!(
                                     "Model reloaded: size={}, model-language={}",
                                     model_size_token(size),
@@ -414,12 +372,10 @@ pub fn run_daemon_loop(
                             )
                         {
                             submit_segment(
-                                &worker,
+                                &mut worker,
                                 config,
                                 &buffer[..speech_end],
                                 buffer_has_leading_overlap,
-                                &mut next_job_index,
-                                &mut pending_jobs,
                                 output,
                             )?;
                             buffer = segmentation::carry_after_cut(
@@ -466,16 +422,13 @@ pub fn run_daemon_loop(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn stop_recording(
-    worker: &TranscriptionWorker,
+    worker: &mut TranscriptionWorker,
     config: &DaemonConfig,
     vad: &audio::VadConfig,
     capture: &mut Option<Box<dyn CaptureSource>>,
     buffer: &mut Vec<f32>,
     buffer_has_leading_overlap: bool,
-    next_job_index: &mut u64,
-    pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
 ) -> Result<(), AppError> {
     let mut active = capture
@@ -488,8 +441,6 @@ fn stop_recording(
         vad,
         buffer,
         buffer_has_leading_overlap,
-        next_job_index,
-        pending_jobs,
         output,
     )?;
     Ok(())
@@ -534,15 +485,13 @@ fn start_active_recording(
 
 #[allow(clippy::too_many_arguments)]
 fn stop_active_recording(
-    worker: &TranscriptionWorker,
+    worker: &mut TranscriptionWorker,
     config: &DaemonConfig,
     vad: &audio::VadConfig,
     recording: &mut bool,
     capture: &mut Option<Box<dyn CaptureSource>>,
     buffer: &mut Vec<f32>,
     buffer_has_leading_overlap: bool,
-    next_job_index: &mut u64,
-    pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
 ) -> Result<(), AppError> {
     *recording = false;
@@ -553,45 +502,30 @@ fn stop_active_recording(
         capture,
         buffer,
         buffer_has_leading_overlap,
-        next_job_index,
-        pending_jobs,
         output,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_final_recording(
-    worker: &TranscriptionWorker,
+    worker: &mut TranscriptionWorker,
     config: &DaemonConfig,
     vad: &audio::VadConfig,
     buffer: &[f32],
     had_overlap: bool,
-    next_job_index: &mut u64,
-    pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
 ) -> Result<(), AppError> {
     let trimmed = audio::trim_trailing_silence(buffer, config.sample_rate, vad);
     if trimmed.is_empty() {
         return Ok(());
     }
-    submit_segment(
-        worker,
-        config,
-        &trimmed,
-        had_overlap,
-        next_job_index,
-        pending_jobs,
-        output,
-    )
+    submit_segment(worker, config, &trimmed, had_overlap, output)
 }
 
 fn submit_segment(
-    worker: &TranscriptionWorker,
+    worker: &mut TranscriptionWorker,
     config: &DaemonConfig,
     samples: &[f32],
     had_overlap: bool,
-    next_job_index: &mut u64,
-    pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
 ) -> Result<(), AppError> {
     if samples.is_empty() {
@@ -601,11 +535,7 @@ fn submit_segment(
     if config.dump_audio {
         dump_audio_samples(samples, config.sample_rate, output)?;
     }
-    let index = *next_job_index;
-    *next_job_index += 1;
-    *pending_jobs += 1;
     worker.submit(TranscriptionJob {
-        index,
         samples: samples.to_vec(),
         duration_ms: audio::samples_to_ms(samples.len(), config.sample_rate),
         language: Some(config.language.clone()),
@@ -614,102 +544,60 @@ fn submit_segment(
 }
 
 fn drain_worker_results(
-    worker: &TranscriptionWorker,
+    worker: &mut TranscriptionWorker,
     config: &DaemonConfig,
     output: &mut dyn DaemonOutput,
-    pending_results: &mut BTreeMap<u64, TranscriptionResult>,
-    next_emit_index: &mut u64,
-    pending_jobs: &mut usize,
     last_emitted_transcript: &mut String,
 ) {
     while let Some(result) = worker.try_recv() {
-        pending_results.insert(result.index, result);
+        emit_worker_result(config, output, result, last_emitted_transcript);
     }
-    emit_ready_results(
-        config,
-        output,
-        pending_results,
-        next_emit_index,
-        pending_jobs,
-        last_emitted_transcript,
-    );
 }
 
 fn wait_for_pending_results(
-    worker: &TranscriptionWorker,
+    worker: &mut TranscriptionWorker,
     config: &DaemonConfig,
     output: &mut dyn DaemonOutput,
-    pending_results: &mut BTreeMap<u64, TranscriptionResult>,
-    next_emit_index: &mut u64,
-    pending_jobs: &mut usize,
     last_emitted_transcript: &mut String,
 ) {
-    while *pending_jobs > 0 {
-        drain_worker_results(
-            worker,
-            config,
-            output,
-            pending_results,
-            next_emit_index,
-            pending_jobs,
-            last_emitted_transcript,
-        );
-        if *pending_jobs == 0 {
-            break;
-        }
+    while worker.has_pending() {
         match worker.recv() {
-            Some(result) => {
-                pending_results.insert(result.index, result);
-                emit_ready_results(
-                    config,
-                    output,
-                    pending_results,
-                    next_emit_index,
-                    pending_jobs,
-                    last_emitted_transcript,
-                );
-            }
+            Some(result) => emit_worker_result(config, output, result, last_emitted_transcript),
             None => break,
         }
     }
 }
 
-fn emit_ready_results(
+fn emit_worker_result(
     config: &DaemonConfig,
     output: &mut dyn DaemonOutput,
-    pending_results: &mut BTreeMap<u64, TranscriptionResult>,
-    next_emit_index: &mut u64,
-    pending_jobs: &mut usize,
+    result: TranscriptionResult,
     last_emitted_transcript: &mut String,
 ) {
-    while let Some(result) = pending_results.remove(next_emit_index) {
-        *next_emit_index += 1;
-        *pending_jobs = pending_jobs.saturating_sub(1);
-        match result.transcript {
-            Ok(transcript) => {
-                let text = if result.had_overlap && !last_emitted_transcript.trim().is_empty() {
-                    segmentation::dedupe_boundary(last_emitted_transcript, &transcript)
+    match result.transcript {
+        Ok(transcript) => {
+            let text = if result.had_overlap && !last_emitted_transcript.trim().is_empty() {
+                segmentation::dedupe_boundary(last_emitted_transcript, &transcript)
+            } else {
+                transcript
+            };
+            if !text.trim().is_empty() {
+                if let Err(err) = emit_transcript(
+                    config,
+                    output,
+                    &text,
+                    audio::SegmentInfo {
+                        index: result.index,
+                        duration_ms: result.duration_ms,
+                    },
+                ) {
+                    output.stderr(&format!("Failed to emit transcript: {err}"));
                 } else {
-                    transcript
-                };
-                if !text.trim().is_empty() {
-                    if let Err(err) = emit_transcript(
-                        config,
-                        output,
-                        &text,
-                        audio::SegmentInfo {
-                            index: result.index,
-                            duration_ms: result.duration_ms,
-                        },
-                    ) {
-                        output.stderr(&format!("Failed to emit transcript: {err}"));
-                    } else {
-                        *last_emitted_transcript = text;
-                    }
+                    *last_emitted_transcript = text;
                 }
             }
-            Err(err) => output.stderr(&format!("Transcription error: {err}")),
         }
+        Err(err) => output.stderr(&format!("Transcription error: {err}")),
     }
 }
 

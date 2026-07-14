@@ -4,8 +4,10 @@ These tests validate the product behavior for the offline Linux CLI.
 
 ## Environment
 - Linux x86_64 machine with a working microphone.
-- Model file available at `${XDG_DATA_HOME:-~/.local/share}/soundvibes/models/ggml-base.en.bin`.
-- Config file at `${XDG_CONFIG_HOME:-~/.config}/soundvibes/config.toml`.
+- `<data-home>` means `$XDG_DATA_HOME` when set, or `~/.local/share` when it is unset.
+- `<config-home>` means `$XDG_CONFIG_HOME` when set, or `~/.config` when it is unset.
+- Model file available at `<data-home>/soundvibes/models/ggml-base.en.bin`.
+- Config file at `<config-home>/soundvibes/config.toml`.
 - No network required.
 - If available, a machine with a supported NVIDIA/AMD GPU for GPU-acceleration checks.
 
@@ -20,13 +22,13 @@ These tests validate the product behavior for the offline Linux CLI.
 ## Tests
 
 ### AT-01: CLI starts with valid model
-- Setup: set `model` in config to `${XDG_DATA_HOME:-~/.local/share}/soundvibes/models/ggml-base.en.bin`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/ggml-base.en.bin`.
 - Command: `sv daemon start`
 - Expect: process starts, listens on socket, no error output.
 - Pass: exit code is `0` after user stops the process.
 
 ### AT-01a: Missing model is auto-downloaded
-- Setup: remove `${XDG_DATA_HOME:-~/.local/share}/soundvibes/models/ggml-small.bin`, set `model_size` to `small` and `model_language` to `auto`.
+- Setup: remove `<data-home>/soundvibes/models/ggml-small.bin`, set `model_size` to `small` and `model_language` to `auto`.
 - Command: `sv daemon start`
 - Expect: model download occurs before startup completes.
 - Pass: model file exists at the default location and daemon starts.
@@ -38,7 +40,7 @@ These tests validate the product behavior for the offline Linux CLI.
 - Pass: model file path resolves to `ggml-<size>.en.bin` when language is `en` and `model_language` is unset; `large-v3-turbo` resolves to `ggml-large-v3-turbo.bin`.
 
 ### AT-02: Missing model returns error
-- Setup: set `model` in config to `${XDG_DATA_HOME:-~/.local/share}/soundvibes/models/missing.bin` and set `download_model = false`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/missing.bin` and set `download_model = false`.
 - Command: `sv daemon start`
 - Expect: error message indicating missing model.
 - Pass: exit code is `2`.
@@ -50,11 +52,18 @@ These tests validate the product behavior for the offline Linux CLI.
 - Pass: exit code is `3`.
 
 ### AT-04: Daemon hold-to-record capture
-- Setup: set `model` in config to `${XDG_DATA_HOME:-~/.local/share}/soundvibes/models/ggml-base.en.bin`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/ggml-base.en.bin`.
 - Command: `sv daemon start` with `[hotkey] enabled = true` and a configured key such as `RIGHTCTRL`.
 - Action: hold the configured key, speak a short sentence, then release the key.
 - Expect: final transcript is printed after key release.
 - Pass: final output appears shortly after release.
+
+### AT-04a: Hotkey keyboard reconnect
+- Setup: set `SV_HARDWARE_TESTS=1` on Linux with writable `/dev/uinput` and readable `/dev/input/event*` devices.
+- Command: `cargo test --test acceptance at04a_hotkey_keyboard_reconnects_without_listener_restart`.
+- Action: the test creates a virtual keyboard, verifies its hold key, removes it, creates a replacement, and verifies the replacement without restarting the listener.
+- Expect: both virtual keyboards produce start and stop control events.
+- Pass: the replacement keyboard is active within the test timeout; the test skips gracefully when `/dev/uinput` is unavailable.
 
 ### AT-05: JSONL output format
 - Setup: set `format` in config to `"jsonl"`.
@@ -78,7 +87,7 @@ These tests validate the product behavior for the offline Linux CLI.
 - Pass: output appears before key release, and the remaining tail is transcribed after release.
 
 ### AT-06: Offline operation
-- Setup: set `model` in config to `${XDG_DATA_HOME:-~/.local/share}/soundvibes/models/ggml-base.en.bin`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/ggml-base.en.bin`.
 - Command: disconnect network, run `sv daemon start`, then hold/release the configured key.
 - Expect: no network access required.
 - Pass: transcription works without network connectivity.
@@ -89,23 +98,11 @@ These tests validate the product behavior for the offline Linux CLI.
 - Expect: GPU machine logs show a GPU backend selected; CPU-only machine logs show fallback to CPU.
 - Pass: transcription succeeds on both, and no manual GPU selection is required.
 
-### AT-08: Release artifacts published
-- Setup: create a GitHub Release with a tag.
-- Command: `gh release view <tag> --json assets`.
-- Expect: assets include the Linux x86_64 tarball and corresponding SHA256 checksum file.
-- Pass: assets are downloadable and checksum matches the tarball contents.
-
 ### AT-09: PR quality gates mirror local checks
 - Setup: open a pull request targeting `main`.
 - Command: `mise run ci` locally and the CI workflow for the PR.
 - Expect: the same set of checks run in both environments.
 - Pass: both local and CI runs complete successfully with matching steps.
-
-### AT-10: Marketing site build and smoke test
-- Setup: ensure Node.js and npm are installed, export `SV_WEB_TESTS=1`.
-- Command: `cargo test --test acceptance -- at10_marketing_site_builds_and_smoke_test`.
-- Expect: `web/` dependencies install, Astro builds, and the UI smoke test passes.
-- Pass: the acceptance test exits 0.
 
 ### AT-11: Paste mode restores clipboard
 - Setup: Wayland session with `wl-copy`, `wl-paste`, `dotool`, and `/dev/uinput` access available.
@@ -113,3 +110,9 @@ These tests validate the product behavior for the offline Linux CLI.
 - Action: put known content with a known MIME type in the clipboard, dictate text, and let SoundVibes paste it.
 - Expect: dictated text is pasted through the configured paste shortcut, and the previous clipboard content is restored with its original MIME type.
 - Pass: automated test-support verifies the command sequence; manual KDE verification confirms Klipper does not retain the temporary transcription when the KDE history-suppression hint is honored.
+
+### AT-12: Daemon commands are acknowledged
+- Setup: start the control socket and daemon loop with test-support audio and transcription adapters.
+- Command: request `status`, request a missing model reload, then request `stop`.
+- Expect: status returns versioned JSON with `state = "idle"` and `language = "en"`; model reload returns its processing error; stop returns success.
+- Pass: each client receives the daemon loop's response rather than inferring success from the socket write.

@@ -17,14 +17,7 @@ pub enum AudioHost {
 
 impl AudioHost {
     pub fn default_for_platform() -> Self {
-        #[cfg(target_os = "linux")]
-        {
-            AudioHost::Alsa
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            AudioHost::Default
-        }
+        AudioHost::Alsa
     }
 }
 
@@ -34,21 +27,4 @@ pub enum VadMode {
     On,
     Off,
     Continuous,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum VadSetting {
-    Bool(bool),
-    Mode(VadMode),
-}
-
-impl VadSetting {
-    pub fn into_mode(self) -> VadMode {
-        match self {
-            VadSetting::Bool(true) => VadMode::On,
-            VadSetting::Bool(false) => VadMode::Off,
-            VadSetting::Mode(mode) => mode,
-        }
-    }
 }

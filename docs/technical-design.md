@@ -23,7 +23,7 @@ This document describes the technical design for the `sv` CLI that performs offl
 ## Components
 
 ### Config
-- Load settings from `${XDG_CONFIG_HOME:-~/.config}/soundvibes/config.toml`.
+- Load settings from `$XDG_CONFIG_HOME/soundvibes/config.toml`, defaulting to `~/.config/soundvibes/config.toml` when the variable is unset.
 - CLI flags complement configuration and override file values when present.
 - Defaults are applied if keys are missing.
 - Configuration struct shared across pipeline components.
@@ -48,14 +48,19 @@ This document describes the technical design for the `sv` CLI that performs offl
 ### Hotkey Control
 - Run `sv daemon start` to start the background service.
 - Hold the configured evdev key to start recording; release it to stop and transcribe.
+- Monitor udev's `input` subsystem and reconcile `/dev/input/event*` devices when keyboards are added, removed, or replaced.
+- Poll evdev and udev file descriptors together, with a 60-second reconciliation fallback for missed notifications.
+- Track the hold state per keyboard so disconnecting the last pressed device stops recording without affecting another pressed keyboard.
 - Store the socket in `${XDG_RUNTIME_DIR}/soundvibes/sv.sock`.
 - Keep socket commands for daemon lifecycle and external start/stop integration.
+- Return a versioned JSON response after each command is processed; expose `sv daemon status` for recording state and language.
+- Report model reload failures to the requesting client instead of treating a successful socket write as a successful reload.
 
-### Text Injection
-- Use a backend abstraction for output delivery.
-- Wayland: use portal virtual keyboard or input capture APIs.
-- X11: use XTest to synthesize keypresses into the focused window.
-- If injection is unavailable, fallback to stdout with a warning.
+### Text Output
+- Use an output mode to select stdout, clipboard, paste, or direct typing.
+- Use `wl-clipboard` to capture and restore the Wayland clipboard.
+- Use `dotool` for paste shortcuts and direct typing through `/dev/uinput`.
+- If configured output is unavailable, fall back to stdout with a warning.
 
 ### Daemon Mode
 - Long-running process that listens for evdev key press/release events.
@@ -76,16 +81,9 @@ This document describes the technical design for the `sv` CLI that performs offl
 - If `model_path` is provided, download or resolve the model there instead of the default location.
 
 ### GPU Backend Selection
-- Build whisper.cpp with GPU backends enabled (Vulkan for AMD/NVIDIA, CUDA for NVIDIA when available).
+- Build whisper.cpp with Vulkan enabled for supported AMD/NVIDIA devices.
 - Always enable GPU usage in runtime params; rely on whisper.cpp backend detection to select the first supported device.
 - Do not expose GPU selection to the user; if no GPU backend is available, inference continues on CPU.
-
-### Release Automation
-- GitHub Actions workflow triggers on release events (tagged releases).
-- Build the Linux x86_64 binary using `cargo build --release`.
-- Package artifacts as a tarball containing `sv` and a README/license if required.
-- Generate SHA256 checksums for release artifacts.
-- Attach artifacts and checksums to the GitHub Release for automated download tooling.
 
 ### CI and Quality Gates
 - GitHub Actions workflow triggers on `pull_request` targeting `main`.
@@ -120,10 +118,9 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Validate final transcript after capture stops.
 - Confirm offline operation by disconnecting network.
 - Validate hold-to-record key press/release behavior.
-- Validate injection into a focused editor.
+- Reconnect an external keyboard and confirm its hold key works without restarting the daemon.
+- Validate paste output in a focused Wayland editor.
 - Validate GPU usage on NVIDIA/AMD systems by checking whisper.cpp startup logs, and verify CPU fallback on systems without a supported GPU backend.
 
 ## Open Questions
-- Best default model (tiny vs base) for CPU speed.
-- VAD threshold calibration on typical laptop microphones.
-- Best supported portal for text injection across compositors.
+- VAD threshold calibration on the local microphone.

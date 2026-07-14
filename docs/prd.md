@@ -12,7 +12,7 @@ This PRD is a living document and should be updated as product requirements and 
 - Use `sv daemon start` to run the service; holding the configured key records, releasing it stops and transcribes.
 - Ship as a single Rust CLI binary plus an automatically downloaded model file.
 - Automatically accelerate inference on NVIDIA/AMD GPUs when available, otherwise fall back to CPU.
-- Enforce PR quality gates that match a single local command for tests and linting.
+- Keep local and pull-request quality gates aligned behind one command.
 
 ## Target Users
 - Linux developers and power users who want local voice-to-text.
@@ -26,7 +26,7 @@ This PRD is a living document and should be updated as product requirements and 
 - Configuration via `config.toml` in the XDG config directory.
 - Works on Linux x86_64.
 - Daemon mode that listens for evdev key press/release events.
-- Daemon mode can inject transcribed text at the cursor when requested.
+- Daemon mode can paste or type transcribed text at the cursor when requested.
 
 ## Non-Goals
 - GUI or tray integration.
@@ -59,7 +59,7 @@ This PRD is a living document and should be updated as product requirements and 
 - Inference: whisper.cpp via Rust FFI bindings, using quantized small models with GPU acceleration when available.
 - Output: final text output to stdout after transcription completes.
 - Control plane: daemon listens for evdev key events and keeps a local socket for lifecycle commands.
-- Text injection: Wayland portal virtual keyboard or X11 XTest.
+- Text output: Wayland clipboard access through `wl-clipboard` and key input through `dotool`.
 
 ## Model Choice
 - Engine: whisper.cpp (FFI) for best accuracy-to-size tradeoff.
@@ -69,18 +69,16 @@ This PRD is a living document and should be updated as product requirements and 
 ## Performance Assumptions
 - Best-effort latency on CPU for a small model.
 - Acceptable transcription time after capture stops.
-- No hard latency SLA in the initial release.
+- No hard latency SLA.
 - GPU acceleration is opportunistic and should not require user configuration.
 
-## Packaging & Distribution
-- Single compiled Rust binary.
-- Download model file to a default data directory on first use.
-- Provide a simple tarball release for Linux.
-- Publish Linux release artifacts via GitHub Releases with checksums for automated download tooling.
+## Local Installation
+- Build or install the Rust binary locally with Cargo.
+- Download the configured model to the default data directory on first use.
 
 ## Configuration
 - Load config from XDG base directory if available.
-- Default path: `${XDG_CONFIG_HOME:-~/.config}/soundvibes/config.toml`.
+- Default path: `$XDG_CONFIG_HOME/soundvibes/config.toml`, or `~/.config/soundvibes/config.toml` when the variable is unset.
 - Config file format: TOML.
 - Config keys: `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
 
@@ -89,7 +87,7 @@ This PRD is a living document and should be updated as product requirements and 
 - Verify transcript appears shortly after releasing the configured key.
 - Confirm tool runs without network access.
 - Validate daemon hold-to-record control.
-- Validate text injection into a focused editor.
+- Validate paste output in a focused Wayland editor.
 - Validate CI runs the same quality gate command as local development.
 
 ## Risks & Mitigations
@@ -98,4 +96,4 @@ This PRD is a living document and should be updated as product requirements and 
 - Audio capture issues on some devices: provide device selection flag.
 - Model size too large: allow user to swap model via CLI flag.
 - Hotkey permissions vary by distro: document input group or udev setup.
-- Text injection permissions vary by compositor: document portal prompts and limitations.
+- Paste permissions vary by session: fall back to stdout when clipboard or uinput access is unavailable.

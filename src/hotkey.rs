@@ -1,17 +1,107 @@
-use std::collections::HashMap;
 use std::fs;
+use std::fs::Metadata;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use evdev::{Device, InputEventKind, Key};
 use serde::Deserialize;
+use udev::{MonitorBuilder, MonitorSocket};
 
 use crate::daemon::ControlEvent;
 use crate::error::AppError;
+
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeviceIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl From<&Metadata> for DeviceIdentity {
+    fn from(metadata: &Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DiscoveredDevice {
+    path: PathBuf,
+    identity: DeviceIdentity,
+}
+
+struct KeyboardDevice<T> {
+    path: PathBuf,
+    identity: DeviceIdentity,
+    input: T,
+    is_pressed: bool,
+}
+
+struct KeyboardDevices<T> {
+    entries: Vec<KeyboardDevice<T>>,
+}
+
+impl<T> KeyboardDevices<T> {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    fn reconcile(
+        &mut self,
+        discovered: Vec<DiscoveredDevice>,
+        mut open: impl FnMut(&DiscoveredDevice) -> Option<T>,
+    ) -> Option<ControlEvent> {
+        let was_pressed = self.any_pressed();
+        self.entries.retain(|current| {
+            discovered.iter().any(|candidate| {
+                candidate.path == current.path && candidate.identity == current.identity
+            })
+        });
+
+        for candidate in discovered {
+            let is_open = self.entries.iter().any(|current| {
+                current.path == candidate.path && current.identity == candidate.identity
+            });
+            if !is_open {
+                if let Some(input) = open(&candidate) {
+                    self.entries.push(KeyboardDevice {
+                        path: candidate.path,
+                        identity: candidate.identity,
+                        input,
+                        is_pressed: false,
+                    });
+                }
+            }
+        }
+        recording_transition(was_pressed, self.any_pressed())
+    }
+
+    fn remove(&mut self, index: usize) -> Option<ControlEvent> {
+        let was_pressed = self.any_pressed();
+        self.entries.remove(index);
+        recording_transition(was_pressed, self.any_pressed())
+    }
+
+    fn set_pressed(&mut self, index: usize, is_pressed: bool) -> Option<ControlEvent> {
+        let was_pressed = self.any_pressed();
+        self.entries[index].is_pressed = is_pressed;
+        recording_transition(was_pressed, self.any_pressed())
+    }
+
+    fn any_pressed(&self) -> bool {
+        self.entries.iter().any(|device| device.is_pressed)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
@@ -38,43 +128,119 @@ pub fn start_listener(
         .as_deref()
         .ok_or_else(|| AppError::config("hotkey.key is required when hotkey.enabled is true"))?;
     let target = parse_key_name(key)?;
-    let mut devices = open_keyboard_devices(Path::new("/dev/input"))?;
-    if devices.is_empty() {
+    let monitor = input_device_monitor()?;
+    let input_dir = Path::new("/dev/input");
+    let mut devices = KeyboardDevices::new();
+    reconcile_devices(&mut devices, input_dir)?;
+    if devices.entries.is_empty() {
         return Err(AppError::runtime(
             "no keyboard device found in /dev/input; add your user to the input group or disable hotkey.enabled",
         ));
     }
 
     let handle = thread::spawn(move || {
-        let mut pressed = false;
+        let mut last_reconcile = Instant::now();
         loop {
-            for device in &mut devices {
-                match device.fetch_events() {
-                    Ok(events) => {
-                        for event in events {
-                            if let InputEventKind::Key(key) = event.kind() {
-                                if let Some(event) =
-                                    hotkey_event(target, key, event.value(), &mut pressed)
-                                {
-                                    if sender.send(event).is_err() {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
+            let mut poll_fds = Vec::with_capacity(devices.entries.len() + 1);
+            poll_fds.push(poll_fd(monitor.as_raw_fd()));
+            poll_fds.extend(
+                devices
+                    .entries
+                    .iter()
+                    .map(|device| poll_fd(device.input.as_raw_fd())),
+            );
+
+            let timeout = reconcile_timeout(last_reconcile);
+            let ready = unsafe {
+                libc::poll(
+                    poll_fds.as_mut_ptr(),
+                    poll_fds.len() as libc::nfds_t,
+                    timeout,
+                )
+            };
+            if ready < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::Interrupted {
+                    eprintln!("hotkey listener poll error: {err}");
+                }
+                continue;
+            }
+
+            let monitor_changed = poll_fds[0].revents != 0;
+            if monitor_changed {
+                drain_monitor(&monitor);
+            }
+
+            let mut disconnected = Vec::new();
+            for (index, poll_state) in poll_fds.iter().skip(1).enumerate() {
+                if poll_state.revents == 0 {
+                    continue;
+                }
+                if poll_state.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                    disconnected.push(index);
+                    continue;
+                }
+
+                let key_events = match devices.entries[index].input.fetch_events() {
+                    Ok(events) => events
+                        .filter_map(|event| match event.kind() {
+                            InputEventKind::Key(key) => Some((key, event.value())),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Vec::new(),
+                    Err(err) if err.raw_os_error() == Some(libc::ENODEV) => {
+                        disconnected.push(index);
+                        continue;
                     }
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(err) if err.raw_os_error() == Some(libc::ENODEV) => {}
-                    Err(err) => eprintln!("hotkey device read error: {err}"),
+                    Err(err) => {
+                        eprintln!("hotkey device read error: {err}");
+                        continue;
+                    }
+                };
+
+                for (key, value) in key_events {
+                    let Some(is_pressed) = hotkey_press(target, key, value) else {
+                        continue;
+                    };
+                    if !send_transition(&sender, devices.set_pressed(index, is_pressed)) {
+                        return;
+                    }
                 }
             }
-            thread::sleep(Duration::from_millis(5));
+
+            disconnected.sort_unstable();
+            disconnected.dedup();
+            for index in disconnected.into_iter().rev() {
+                if !send_transition(&sender, devices.remove(index)) {
+                    return;
+                }
+            }
+
+            if monitor_changed || last_reconcile.elapsed() >= RECONCILE_INTERVAL {
+                last_reconcile = Instant::now();
+                match reconcile_devices(&mut devices, input_dir) {
+                    Ok(event) => {
+                        if !send_transition(&sender, event) {
+                            return;
+                        }
+                    }
+                    Err(err) => eprintln!("hotkey device reconciliation error: {err}"),
+                }
+            }
         }
     });
     Ok(handle)
 }
 
-fn open_keyboard_devices(input_dir: &Path) -> Result<Vec<Device>, AppError> {
+fn input_device_monitor() -> Result<MonitorSocket, AppError> {
+    MonitorBuilder::new()
+        .and_then(|monitor| monitor.match_subsystem("input"))
+        .and_then(MonitorBuilder::listen)
+        .map_err(|err| AppError::runtime(format!("failed to monitor input devices: {err}")))
+}
+
+fn discover_devices(input_dir: &Path) -> Result<Vec<DiscoveredDevice>, AppError> {
     let entries = fs::read_dir(input_dir).map_err(|err| {
         AppError::runtime(format!(
             "failed to read {} for hotkey devices: {err}",
@@ -87,31 +253,66 @@ fn open_keyboard_devices(input_dir: &Path) -> Result<Vec<Device>, AppError> {
         if !is_event_device(&path) {
             continue;
         }
-        let Ok(device) = Device::open(&path) else {
+        let Ok(metadata) = fs::metadata(&path) else {
             continue;
         };
-        if is_keyboard(&device) {
-            set_nonblocking(&device);
-            devices.push(device);
-        }
+        devices.push(DiscoveredDevice {
+            path,
+            identity: DeviceIdentity::from(&metadata),
+        });
     }
+    devices.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     Ok(devices)
+}
+
+fn reconcile_devices(
+    devices: &mut KeyboardDevices<Device>,
+    input_dir: &Path,
+) -> Result<Option<ControlEvent>, AppError> {
+    let discovered = discover_devices(input_dir)?;
+    Ok(devices.reconcile(discovered, |candidate| {
+        let device = Device::open(&candidate.path).ok()?;
+        if !is_keyboard(&device) {
+            return None;
+        }
+        set_nonblocking(&device);
+        Some(device)
+    }))
+}
+
+fn poll_fd(fd: libc::c_int) -> libc::pollfd {
+    libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }
+}
+
+fn reconcile_timeout(last_reconcile: Instant) -> libc::c_int {
+    RECONCILE_INTERVAL
+        .saturating_sub(last_reconcile.elapsed())
+        .as_millis()
+        .min(libc::c_int::MAX as u128) as libc::c_int
+}
+
+fn drain_monitor(monitor: &MonitorSocket) {
+    while monitor.iter().next().is_some() {}
+}
+
+fn send_transition(sender: &Sender<ControlEvent>, event: Option<ControlEvent>) -> bool {
+    event.is_none_or(|event| sender.send(event).is_ok())
 }
 
 fn is_event_device(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name.starts_with("event"))
-        .unwrap_or(false)
+        .is_some_and(|name| name.starts_with("event"))
 }
 
 fn is_keyboard(device: &Device) -> bool {
-    device
-        .supported_keys()
-        .map(|keys| {
-            keys.contains(Key::KEY_A) && keys.contains(Key::KEY_Z) && keys.contains(Key::KEY_ENTER)
-        })
-        .unwrap_or(false)
+    device.supported_keys().is_some_and(|keys| {
+        keys.contains(Key::KEY_A) && keys.contains(Key::KEY_Z) && keys.contains(Key::KEY_ENTER)
+    })
 }
 
 fn set_nonblocking(device: &Device) {
@@ -124,20 +325,21 @@ fn set_nonblocking(device: &Device) {
     }
 }
 
-fn hotkey_event(target: Key, key: Key, value: i32, pressed: &mut bool) -> Option<ControlEvent> {
+fn hotkey_press(target: Key, key: Key, value: i32) -> Option<bool> {
     if key != target {
         return None;
     }
     match value {
-        1 if !*pressed => {
-            *pressed = true;
-            Some(ControlEvent::StartRecording)
-        }
-        0 if *pressed => {
-            *pressed = false;
-            Some(ControlEvent::StopRecording)
-        }
-        2 => None,
+        1 => Some(true),
+        0 => Some(false),
+        _ => None,
+    }
+}
+
+fn recording_transition(was_pressed: bool, is_pressed: bool) -> Option<ControlEvent> {
+    match (was_pressed, is_pressed) {
+        (false, true) => Some(ControlEvent::StartRecording),
+        (true, false) => Some(ControlEvent::StopRecording),
         _ => None,
     }
 }
@@ -171,7 +373,7 @@ pub fn parse_key_name(name: &str) -> Result<Key, AppError> {
         )));
     }
 
-    if let Some(alias) = common_key_aliases().get(key_name.as_str()).copied() {
+    if let Some(alias) = common_key_alias(key_name.as_str()) {
         return Ok(alias);
     }
     Key::from_str(&normalized)
@@ -183,18 +385,15 @@ pub fn parse_key_name(name: &str) -> Result<Key, AppError> {
         })
 }
 
-fn common_key_aliases() -> HashMap<&'static str, Key> {
-    [
-        ("LEFT_CTRL", Key::KEY_LEFTCTRL),
-        ("LCTRL", Key::KEY_LEFTCTRL),
-        ("RIGHT_CTRL", Key::KEY_RIGHTCTRL),
-        ("RCTRL", Key::KEY_RIGHTCTRL),
-        ("LALT", Key::KEY_LEFTALT),
-        ("RALT", Key::KEY_RIGHTALT),
-        ("ESC", Key::KEY_ESC),
-    ]
-    .into_iter()
-    .collect()
+fn common_key_alias(name: &str) -> Option<Key> {
+    match name {
+        "LEFT_CTRL" | "LCTRL" => Some(Key::KEY_LEFTCTRL),
+        "RIGHT_CTRL" | "RCTRL" => Some(Key::KEY_RIGHTCTRL),
+        "LALT" => Some(Key::KEY_LEFTALT),
+        "RALT" => Some(Key::KEY_RIGHTALT),
+        "ESC" => Some(Key::KEY_ESC),
+        _ => None,
+    }
 }
 
 const XKB_OFFSET: u16 = 8;
@@ -233,6 +432,68 @@ fn parse_prefixed_keycode(value: &str) -> Result<Option<Key>, AppError> {
 mod tests {
     use super::*;
 
+    fn discovered(path: &str, inode: u64) -> DiscoveredDevice {
+        DiscoveredDevice {
+            path: PathBuf::from(path),
+            identity: DeviceIdentity { device: 1, inode },
+        }
+    }
+
+    #[test]
+    fn reconciliation_adds_keyboards_discovered_after_startup() {
+        let mut devices = KeyboardDevices::new();
+
+        devices.reconcile(vec![discovered("event1", 1)], |device| {
+            Some(device.path.clone())
+        });
+        devices.reconcile(
+            vec![discovered("event1", 1), discovered("event2", 2)],
+            |device| Some(device.path.clone()),
+        );
+
+        assert_eq!(
+            devices
+                .entries
+                .iter()
+                .map(|device| device.input.clone())
+                .collect::<Vec<_>>(),
+            [PathBuf::from("event1"), PathBuf::from("event2")]
+        );
+    }
+
+    #[test]
+    fn reconciliation_replaces_a_reused_event_node() {
+        let mut devices = KeyboardDevices::new();
+        devices.reconcile(vec![discovered("event1", 1)], |_| Some("original"));
+
+        devices.reconcile(vec![discovered("event1", 2)], |_| Some("replacement"));
+
+        assert_eq!(devices.entries.len(), 1);
+        assert_eq!(devices.entries[0].input, "replacement");
+    }
+
+    #[test]
+    fn disconnecting_the_last_pressed_keyboard_stops_recording() {
+        let mut devices = KeyboardDevices::new();
+        devices.reconcile(
+            vec![discovered("event1", 1), discovered("event2", 2)],
+            |_| Some(()),
+        );
+        assert!(matches!(
+            devices.set_pressed(0, true),
+            Some(ControlEvent::StartRecording)
+        ));
+        assert!(devices.set_pressed(1, true).is_none());
+
+        assert!(devices
+            .reconcile(vec![discovered("event2", 2)], |_| Some(()))
+            .is_none());
+        assert!(matches!(
+            devices.reconcile(Vec::new(), |_| Some(())),
+            Some(ControlEvent::StopRecording)
+        ));
+    }
+
     #[test]
     fn parses_right_control_hotkey_name() {
         assert_eq!(parse_key_name("RIGHTCTRL").unwrap(), Key::KEY_RIGHTCTRL);
@@ -255,18 +516,27 @@ mod tests {
 
     #[test]
     fn converts_press_and_release_to_recording_events() {
-        let mut pressed = false;
+        let mut devices = KeyboardDevices::new();
+        devices.reconcile(vec![discovered("event1", 1)], |_| Some(()));
         assert_eq!(
-            hotkey_event(Key::KEY_RIGHTCTRL, Key::KEY_RIGHTCTRL, 1, &mut pressed),
-            Some(ControlEvent::StartRecording)
+            hotkey_press(Key::KEY_RIGHTCTRL, Key::KEY_RIGHTCTRL, 1),
+            Some(true)
         );
+        assert!(matches!(
+            devices.set_pressed(0, true),
+            Some(ControlEvent::StartRecording)
+        ));
         assert_eq!(
-            hotkey_event(Key::KEY_RIGHTCTRL, Key::KEY_RIGHTCTRL, 2, &mut pressed),
+            hotkey_press(Key::KEY_RIGHTCTRL, Key::KEY_RIGHTCTRL, 2),
             None
         );
         assert_eq!(
-            hotkey_event(Key::KEY_RIGHTCTRL, Key::KEY_RIGHTCTRL, 0, &mut pressed),
-            Some(ControlEvent::StopRecording)
+            hotkey_press(Key::KEY_RIGHTCTRL, Key::KEY_RIGHTCTRL, 0),
+            Some(false)
         );
+        assert!(matches!(
+            devices.set_pressed(0, false),
+            Some(ControlEvent::StopRecording)
+        ));
     }
 }

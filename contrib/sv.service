@@ -1,10 +1,11 @@
 [Unit]
 Description=SoundVibes speech-to-text daemon
 After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/sv daemon start --vad continuous --vad-silence-ms 600 --audio-feedback --no-speech-timeout-ms 3000
+ExecStart=%h/.cargo/bin/sv daemon start
 Restart=on-failure
 RestartSec=5
 

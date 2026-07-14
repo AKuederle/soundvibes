@@ -1,14 +1,16 @@
 use chrono::{Local, Utc};
+use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::flag;
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -20,6 +22,7 @@ use crate::hotkey::{self, HotkeyConfig};
 use crate::model::{self, ModelLanguage, ModelSize, ModelSpec};
 use crate::output::{self, OutputConfig, OutputMode};
 use crate::segmentation::{self, CutReason, SegmentConfig, SegmentDecision};
+pub use crate::transcription_worker::Transcriber;
 use crate::transcription_worker::{TranscriptionJob, TranscriptionResult, TranscriptionWorker};
 use crate::types::{AudioHost, OutputFormat, VadMode};
 use crate::whisper::WhisperContext;
@@ -33,7 +36,6 @@ pub struct DaemonConfig {
     pub audio_host: AudioHost,
     pub sample_rate: u32,
     pub format: OutputFormat,
-    pub mode: OutputMode,
     pub output: OutputConfig,
     pub vad: VadMode,
     pub vad_silence_ms: u64,
@@ -44,7 +46,6 @@ pub struct DaemonConfig {
     pub segment_overlap_ms: u64,
     pub segment_min_ms: u64,
     pub debug_audio: bool,
-    pub debug_vad: bool,
     pub dump_audio: bool,
     pub audio_feedback: bool,
     pub no_speech_timeout_ms: u64,
@@ -82,10 +83,6 @@ pub trait AudioBackend {
     ) -> Result<Box<dyn CaptureSource>, audio::AudioError>;
 }
 
-pub trait Transcriber: Send {
-    fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String, AppError>;
-}
-
 pub trait TranscriberFactory {
     fn load(&self, model_path: Option<&Path>) -> Result<Box<dyn Transcriber>, AppError>;
 }
@@ -107,11 +104,8 @@ impl Default for DaemonDeps {
 pub fn select_audio_host(audio_host: AudioHost) -> Result<cpal::Host, AppError> {
     match audio_host {
         AudioHost::Default => Ok(cpal::default_host()),
-        _ => {
-            let host_id = match audio_host {
-                AudioHost::Alsa => cpal::HostId::Alsa,
-                AudioHost::Default => cpal::HostId::Alsa,
-            };
+        AudioHost::Alsa => {
+            let host_id = cpal::HostId::Alsa;
             if !cpal::available_hosts().contains(&host_id) {
                 let available = cpal::available_hosts()
                     .into_iter()
@@ -128,16 +122,120 @@ pub fn select_audio_host(audio_host: AudioHost) -> Result<cpal::Host, AppError> 
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+const CONTROL_API_VERSION: &str = "1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlResponse {
+    pub api_version: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl ControlResponse {
+    fn success(state: Option<&str>, language: Option<&str>) -> Self {
+        Self {
+            api_version: CONTROL_API_VERSION.to_string(),
+            ok: true,
+            state: state.map(str::to_string),
+            language: language.map(str::to_string),
+            message: None,
+        }
+    }
+
+    fn success_with_message(state: &str, language: &str, message: String) -> Self {
+        let mut response = Self::success(Some(state), Some(language));
+        response.message = Some(message);
+        response
+    }
+
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            api_version: CONTROL_API_VERSION.to_string(),
+            ok: false,
+            state: None,
+            language: None,
+            message: Some(message.into()),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum ControlEvent {
     StartRecording,
     StopRecording,
     Stop,
+    Status,
     SetModel {
         size: ModelSize,
         model_language: ModelLanguage,
     },
     Error(String),
+    Request {
+        event: Box<ControlEvent>,
+        respond_to: SyncSender<ControlResponse>,
+    },
+}
+
+struct ActiveRecording {
+    capture: Box<dyn CaptureSource>,
+    buffer: Vec<f32>,
+    has_leading_overlap: bool,
+    trailing_silence_samples: usize,
+    started: std::time::Instant,
+    speech_detector: audio::SpeechDetector,
+}
+
+impl ActiveRecording {
+    fn start(
+        deps: &DaemonDeps,
+        host: &cpal::Host,
+        config: &DaemonConfig,
+        output: &mut dyn DaemonOutput,
+    ) -> Result<Self, AppError> {
+        let capture = deps
+            .audio
+            .start_capture(host, config.device.as_deref(), config.sample_rate)
+            .map_err(|err| AppError::audio(err.message))?;
+        output.stdout("Recording started.");
+        if config.audio_feedback {
+            feedback::play_start_sound();
+        }
+        Ok(Self {
+            capture,
+            buffer: Vec::new(),
+            has_leading_overlap: false,
+            trailing_silence_samples: 0,
+            started: std::time::Instant::now(),
+            speech_detector: audio::SpeechDetector::new(
+                config.vad_threshold,
+                100,
+                config.sample_rate,
+            ),
+        })
+    }
+
+    fn finish(
+        mut self,
+        worker: &mut TranscriptionWorker,
+        config: &DaemonConfig,
+        vad: &audio::VadConfig,
+        output: &mut dyn DaemonOutput,
+    ) -> Result<(), AppError> {
+        self.capture.drain(&mut self.buffer);
+        submit_final_recording(
+            worker,
+            config,
+            vad,
+            &self.buffer,
+            self.has_leading_overlap,
+            output,
+        )
+    }
 }
 
 pub fn run_daemon(
@@ -199,266 +297,186 @@ pub fn run_daemon_loop(
         config.vad_silence_ms,
         config.vad_threshold,
         config.vad_chunk_ms,
-        config.debug_vad,
     );
 
-    let mut recording = false;
-    let mut buffer = Vec::new();
-    let mut next_job_index = 1u64;
-    let mut next_emit_index = 1u64;
-    let mut pending_jobs = 0usize;
-    let mut pending_results = BTreeMap::new();
+    let mut recording: Option<ActiveRecording> = None;
     let mut last_emitted_transcript = String::new();
-    let mut capture: Option<Box<dyn CaptureSource>> = None;
-    let mut buffer_has_leading_overlap = false;
-    // For continuous mode: track silence at end of buffer
-    let mut trailing_silence_samples: usize = 0;
-    // For no-speech timeout: track when recording started and sustained speech
-    let mut recording_started: Option<std::time::Instant> = None;
-    let mut speech_detected = false;
-    let mut speech_samples: usize = 0;
-    // Require 100ms of speech to count as "speech detected"
-    let speech_confirm_samples = (0.1 * config.sample_rate as f32) as usize;
     // Grace period after recording starts to ignore audio feedback pickup (500ms)
     let speech_detection_grace_ms: u64 = if config.audio_feedback { 500 } else { 0 };
     let segment_config = segment_config(config);
 
     loop {
-        drain_worker_results(
-            &worker,
-            config,
-            output,
-            &mut pending_results,
-            &mut next_emit_index,
-            &mut pending_jobs,
-            &mut last_emitted_transcript,
-        );
+        drain_worker_results(&mut worker, config, output, &mut last_emitted_transcript);
 
         if shutdown.load(Ordering::Relaxed) {
-            if recording {
-                stop_recording(
-                    &worker,
-                    config,
-                    &vad,
-                    &mut capture,
-                    &mut buffer,
-                    buffer_has_leading_overlap,
-                    &mut next_job_index,
-                    &mut pending_jobs,
-                    output,
-                )?;
+            if let Some(active) = recording.take() {
+                active.finish(&mut worker, config, &vad, output)?;
             }
-            wait_for_pending_results(
-                &worker,
-                config,
-                output,
-                &mut pending_results,
-                &mut next_emit_index,
-                &mut pending_jobs,
-                &mut last_emitted_transcript,
-            );
+            wait_for_pending_results(&mut worker, config, output, &mut last_emitted_transcript);
             worker.shutdown()?;
             output.stdout("Daemon shutting down.");
             break;
         }
-        match control_events.recv_timeout(Duration::from_millis(20)) {
-            Ok(ControlEvent::StartRecording) => {
-                if !recording {
-                    start_active_recording(
-                        deps,
-                        &host,
-                        config,
-                        &mut recording,
-                        &mut capture,
-                        &mut buffer,
-                        &mut trailing_silence_samples,
-                        &mut recording_started,
-                        &mut speech_detected,
-                        &mut speech_samples,
-                        output,
-                    )?;
-                    buffer_has_leading_overlap = false;
-                }
-            }
-            Ok(ControlEvent::StopRecording) => {
-                if recording {
-                    stop_active_recording(
-                        &worker,
-                        config,
-                        &vad,
-                        &mut recording,
-                        &mut capture,
-                        &mut buffer,
-                        buffer_has_leading_overlap,
-                        &mut next_job_index,
-                        &mut pending_jobs,
-                        output,
-                    )?;
-                    buffer_has_leading_overlap = false;
-                    wait_for_pending_results(
-                        &worker,
-                        config,
-                        output,
-                        &mut pending_results,
-                        &mut next_emit_index,
-                        &mut pending_jobs,
-                        &mut last_emitted_transcript,
-                    );
-                    output.stdout("Ready for next utterance.");
-                    if config.audio_feedback {
-                        feedback::play_stop_sound();
-                    }
-                }
-            }
-            Ok(ControlEvent::Stop) => {
-                shutdown.store(true, Ordering::Relaxed);
-            }
-            Ok(ControlEvent::SetModel {
-                size,
-                model_language,
-            }) => {
-                if recording {
-                    recording = false;
-                    buffer.clear();
-                    capture = None;
-                    buffer_has_leading_overlap = false;
-                    output.stdout("Recording stopped for model reload.");
-                }
-                wait_for_pending_results(
-                    &worker,
-                    config,
-                    output,
-                    &mut pending_results,
-                    &mut next_emit_index,
-                    &mut pending_jobs,
-                    &mut last_emitted_transcript,
-                );
-                let spec = ModelSpec::new(size, model_language);
-                match model::prepare_model(None, &spec, config.download_model) {
-                    Ok(prepared) => {
-                        if prepared.downloaded {
-                            output.stdout("Model download complete.");
-                        }
-                        let new_path = prepared.path.clone();
-                        match deps.transcriber_factory.load(Some(&new_path)) {
-                            Ok(new_transcriber) => {
-                                let mut old_worker = std::mem::replace(
-                                    &mut worker,
-                                    TranscriptionWorker::start(new_transcriber),
-                                );
-                                old_worker.shutdown()?;
-                                output.stdout(&format!(
-                                    "Model reloaded: size={}, model-language={}",
-                                    model_size_token(size),
-                                    model_language_token(model_language)
-                                ));
-                            }
-                            Err(err) => {
-                                output.stderr(&format!("Model reload failed: {err}"));
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        output.stderr(&format!("Model reload failed: {err}"));
-                    }
-                }
-            }
-            Ok(ControlEvent::Error(message)) => return Err(AppError::runtime(message)),
-            Err(RecvTimeoutError::Timeout) => {}
+        let received = match control_events.recv_timeout(Duration::from_millis(20)) {
+            Ok(event) => Some(event),
+            Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(AppError::runtime("socket listener disconnected"))
             }
-        }
-
-        if recording {
-            if let Some(active) = capture.as_mut() {
-                let prev_len = buffer.len();
-                active.drain(&mut buffer);
-                let new_samples = buffer.len() - prev_len;
-
-                // Check for speech in new samples
-                if new_samples > 0 {
-                    let new_audio = &buffer[prev_len..];
-                    let rms = audio::rms_energy(new_audio);
-
-                    // Track sustained speech for no-speech timeout (skip grace period for audio feedback)
-                    let in_grace_period = recording_started
-                        .map(|t| (t.elapsed().as_millis() as u64) < speech_detection_grace_ms)
-                        .unwrap_or(false);
-
-                    if !in_grace_period {
-                        if rms >= config.vad_threshold {
-                            speech_samples += new_samples;
-                            if speech_samples >= speech_confirm_samples {
-                                speech_detected = true;
+        };
+        if let Some(received) = received {
+            let (event, respond_to) = match received {
+                ControlEvent::Request { event, respond_to } => (*event, Some(respond_to)),
+                event => (event, None),
+            };
+            match event {
+                ControlEvent::StartRecording => {
+                    if recording.is_none() {
+                        match ActiveRecording::start(deps, &host, config, output) {
+                            Ok(active) => recording = Some(active),
+                            Err(err) if respond_to.is_some() => {
+                                acknowledge_error(respond_to.as_ref(), &err);
+                                continue;
                             }
-                        } else {
-                            // Reset on silence (require continuous speech)
-                            speech_samples = 0;
+                            Err(err) => return Err(err),
                         }
                     }
-
-                    if config.vad == VadMode::Continuous {
-                        if rms < config.vad_threshold {
-                            trailing_silence_samples += new_samples;
-                        } else {
-                            trailing_silence_samples = 0;
+                    acknowledge_success(respond_to.as_ref(), &recording, config, None);
+                }
+                ControlEvent::StopRecording => {
+                    if let Some(active) = recording.take() {
+                        if let Err(err) = active.finish(&mut worker, config, &vad, output) {
+                            if respond_to.is_some() {
+                                acknowledge_error(respond_to.as_ref(), &err);
+                                continue;
+                            }
+                            return Err(err);
                         }
-
-                        if let SegmentDecision::Cut { speech_end, reason } =
-                            segmentation::decide_segment(
-                                &segment_config,
-                                buffer.len(),
-                                trailing_silence_samples,
-                                rms,
-                            )
-                        {
-                            submit_segment(
-                                &worker,
+                        wait_for_pending_results(
+                            &mut worker,
+                            config,
+                            output,
+                            &mut last_emitted_transcript,
+                        );
+                        output.stdout("Ready for next utterance.");
+                        if config.audio_feedback {
+                            feedback::play_stop_sound();
+                        }
+                    }
+                    acknowledge_success(respond_to.as_ref(), &recording, config, None);
+                }
+                ControlEvent::Stop => {
+                    acknowledge_success(respond_to.as_ref(), &recording, config, None);
+                    shutdown.store(true, Ordering::Relaxed);
+                }
+                ControlEvent::Status => {
+                    acknowledge_success(respond_to.as_ref(), &recording, config, None);
+                }
+                ControlEvent::SetModel {
+                    size,
+                    model_language,
+                } => {
+                    match reload_model(
+                        size,
+                        model_language,
+                        &mut recording,
+                        &mut worker,
+                        config,
+                        deps,
+                        output,
+                        &mut last_emitted_transcript,
+                    ) {
+                        Ok(message) => {
+                            output.stdout(&message);
+                            acknowledge_success(
+                                respond_to.as_ref(),
+                                &recording,
                                 config,
-                                &buffer[..speech_end],
-                                buffer_has_leading_overlap,
-                                &mut next_job_index,
-                                &mut pending_jobs,
-                                output,
-                            )?;
-                            buffer = segmentation::carry_after_cut(
-                                &buffer,
-                                speech_end,
-                                &segment_config,
-                                reason,
+                                Some(message),
                             );
-                            buffer_has_leading_overlap = reason != CutReason::Silence
-                                && carried_overlap_contains_speech(
-                                    &buffer,
-                                    segment_config.sample_rate,
-                                    segment_config.vad_threshold,
-                                    config.vad_chunk_ms,
-                                );
-                            trailing_silence_samples = 0;
-                            speech_detected = false;
-                            speech_samples = 0;
-                            recording_started = Some(std::time::Instant::now());
+                        }
+                        Err(err) => {
+                            output.stderr(&format!("Model reload failed: {err}"));
+                            acknowledge_error(respond_to.as_ref(), &err);
                         }
                     }
                 }
+                ControlEvent::Error(message) => return Err(AppError::runtime(message)),
+                ControlEvent::Request { .. } => {
+                    unreachable!("control request was already unwrapped")
+                }
+            }
+        }
 
-                // Check for no-speech timeout
-                if config.no_speech_timeout_ms > 0
-                    && !speech_detected
-                    && recording_started
-                        .map(|t| (t.elapsed().as_millis() as u64) >= config.no_speech_timeout_ms)
-                        .unwrap_or(false)
-                {
-                    recording = false;
-                    buffer.clear();
-                    capture = None;
-                    buffer_has_leading_overlap = false;
-                    recording_started = None;
-                    output.stdout("No speech detected, cancelled.");
-                    if config.audio_feedback {
-                        feedback::play_stop_sound();
+        if let Some(active) = recording.as_mut() {
+            let prev_len = active.buffer.len();
+            active.capture.drain(&mut active.buffer);
+            let new_samples = active.buffer.len() - prev_len;
+
+            // Check for speech in new samples
+            if new_samples > 0 {
+                let new_audio = &active.buffer[prev_len..];
+                let rms = audio::rms_energy(new_audio);
+
+                // Track sustained speech for no-speech timeout (skip grace period for audio feedback)
+                let in_grace_period =
+                    (active.started.elapsed().as_millis() as u64) < speech_detection_grace_ms;
+
+                if !in_grace_period {
+                    active.speech_detector.process(new_audio);
+                }
+
+                if config.vad == VadMode::Continuous {
+                    if rms < config.vad_threshold {
+                        active.trailing_silence_samples += new_samples;
+                    } else {
+                        active.trailing_silence_samples = 0;
                     }
+
+                    if let SegmentDecision::Cut { speech_end, reason } =
+                        segmentation::decide_segment(
+                            &segment_config,
+                            active.buffer.len(),
+                            active.trailing_silence_samples,
+                            rms,
+                        )
+                    {
+                        submit_segment(
+                            &mut worker,
+                            config,
+                            &active.buffer[..speech_end],
+                            active.has_leading_overlap,
+                            output,
+                        )?;
+                        active.buffer = segmentation::carry_after_cut(
+                            &active.buffer,
+                            speech_end,
+                            &segment_config,
+                            reason,
+                        );
+                        active.has_leading_overlap = reason != CutReason::Silence
+                            && carried_overlap_contains_speech(
+                                &active.buffer,
+                                segment_config.sample_rate,
+                                segment_config.vad_threshold,
+                                config.vad_chunk_ms,
+                            );
+                        active.trailing_silence_samples = 0;
+                        active.speech_detector.reset();
+                        active.started = std::time::Instant::now();
+                    }
+                }
+            }
+
+            // Check for no-speech timeout
+            if config.no_speech_timeout_ms > 0
+                && !active.speech_detector.is_detected()
+                && (active.started.elapsed().as_millis() as u64) >= config.no_speech_timeout_ms
+            {
+                recording = None;
+                output.stdout("No speech detected, cancelled.");
+                if config.audio_feedback {
+                    feedback::play_stop_sound();
                 }
             }
         }
@@ -466,132 +484,80 @@ pub fn run_daemon_loop(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn stop_recording(
-    worker: &TranscriptionWorker,
+fn acknowledge_success(
+    respond_to: Option<&SyncSender<ControlResponse>>,
+    recording: &Option<ActiveRecording>,
     config: &DaemonConfig,
-    vad: &audio::VadConfig,
-    capture: &mut Option<Box<dyn CaptureSource>>,
-    buffer: &mut Vec<f32>,
-    buffer_has_leading_overlap: bool,
-    next_job_index: &mut u64,
-    pending_jobs: &mut usize,
-    output: &mut dyn DaemonOutput,
-) -> Result<(), AppError> {
-    let mut active = capture
-        .take()
-        .ok_or_else(|| AppError::runtime("capture stream missing"))?;
-    active.drain(buffer);
-    submit_final_recording(
-        worker,
-        config,
-        vad,
-        buffer,
-        buffer_has_leading_overlap,
-        next_job_index,
-        pending_jobs,
-        output,
-    )?;
-    Ok(())
+    message: Option<String>,
+) {
+    let Some(respond_to) = respond_to else {
+        return;
+    };
+    let state = if recording.is_some() {
+        "recording"
+    } else {
+        "idle"
+    };
+    let response = match message {
+        Some(message) => ControlResponse::success_with_message(state, &config.language, message),
+        None => ControlResponse::success(Some(state), Some(&config.language)),
+    };
+    let _ = respond_to.send(response);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn start_active_recording(
-    deps: &DaemonDeps,
-    host: &cpal::Host,
-    config: &DaemonConfig,
-    recording: &mut bool,
-    capture: &mut Option<Box<dyn CaptureSource>>,
-    buffer: &mut Vec<f32>,
-    trailing_silence_samples: &mut usize,
-    recording_started: &mut Option<std::time::Instant>,
-    speech_detected: &mut bool,
-    speech_samples: &mut usize,
-    output: &mut dyn DaemonOutput,
-) -> Result<(), AppError> {
-    let new_capture = deps
-        .audio
-        .start_capture(host, config.device.as_deref(), config.sample_rate)
-        .map_err(|err| match err.kind {
-            audio::AudioErrorKind::DeviceNotFound if config.device.is_some() => {
-                AppError::audio(err.message)
-            }
-            _ => AppError::audio(err.message),
-        })?;
-    *recording = true;
-    buffer.clear();
-    *trailing_silence_samples = 0;
-    *recording_started = Some(std::time::Instant::now());
-    *speech_detected = false;
-    *speech_samples = 0;
-    *capture = Some(new_capture);
-    output.stdout("Recording started.");
-    if config.audio_feedback {
-        feedback::play_start_sound();
+fn acknowledge_error(respond_to: Option<&SyncSender<ControlResponse>>, err: &AppError) {
+    if let Some(respond_to) = respond_to {
+        let _ = respond_to.send(ControlResponse::error(err.to_string()));
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn stop_active_recording(
-    worker: &TranscriptionWorker,
+fn reload_model(
+    size: ModelSize,
+    model_language: ModelLanguage,
+    recording: &mut Option<ActiveRecording>,
+    worker: &mut TranscriptionWorker,
     config: &DaemonConfig,
-    vad: &audio::VadConfig,
-    recording: &mut bool,
-    capture: &mut Option<Box<dyn CaptureSource>>,
-    buffer: &mut Vec<f32>,
-    buffer_has_leading_overlap: bool,
-    next_job_index: &mut u64,
-    pending_jobs: &mut usize,
+    deps: &DaemonDeps,
     output: &mut dyn DaemonOutput,
-) -> Result<(), AppError> {
-    *recording = false;
-    stop_recording(
-        worker,
-        config,
-        vad,
-        capture,
-        buffer,
-        buffer_has_leading_overlap,
-        next_job_index,
-        pending_jobs,
-        output,
-    )
+    last_emitted_transcript: &mut String,
+) -> Result<String, AppError> {
+    if recording.take().is_some() {
+        output.stdout("Recording stopped for model reload.");
+    }
+    wait_for_pending_results(worker, config, output, last_emitted_transcript);
+    let spec = ModelSpec::new(size, model_language);
+    let prepared = model::prepare_model(None, &spec, config.download_model)?;
+    if prepared.downloaded {
+        output.stdout("Model download complete.");
+    }
+    let new_transcriber = deps.transcriber_factory.load(Some(&prepared.path))?;
+    worker.reload(new_transcriber)?;
+    Ok(format!(
+        "Model reloaded: size={size}, model-language={model_language}"
+    ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_final_recording(
-    worker: &TranscriptionWorker,
+    worker: &mut TranscriptionWorker,
     config: &DaemonConfig,
     vad: &audio::VadConfig,
     buffer: &[f32],
     had_overlap: bool,
-    next_job_index: &mut u64,
-    pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
 ) -> Result<(), AppError> {
     let trimmed = audio::trim_trailing_silence(buffer, config.sample_rate, vad);
     if trimmed.is_empty() {
         return Ok(());
     }
-    submit_segment(
-        worker,
-        config,
-        &trimmed,
-        had_overlap,
-        next_job_index,
-        pending_jobs,
-        output,
-    )
+    submit_segment(worker, config, &trimmed, had_overlap, output)
 }
 
 fn submit_segment(
-    worker: &TranscriptionWorker,
+    worker: &mut TranscriptionWorker,
     config: &DaemonConfig,
     samples: &[f32],
     had_overlap: bool,
-    next_job_index: &mut u64,
-    pending_jobs: &mut usize,
     output: &mut dyn DaemonOutput,
 ) -> Result<(), AppError> {
     if samples.is_empty() {
@@ -601,11 +567,7 @@ fn submit_segment(
     if config.dump_audio {
         dump_audio_samples(samples, config.sample_rate, output)?;
     }
-    let index = *next_job_index;
-    *next_job_index += 1;
-    *pending_jobs += 1;
     worker.submit(TranscriptionJob {
-        index,
         samples: samples.to_vec(),
         duration_ms: audio::samples_to_ms(samples.len(), config.sample_rate),
         language: Some(config.language.clone()),
@@ -614,102 +576,57 @@ fn submit_segment(
 }
 
 fn drain_worker_results(
-    worker: &TranscriptionWorker,
+    worker: &mut TranscriptionWorker,
     config: &DaemonConfig,
     output: &mut dyn DaemonOutput,
-    pending_results: &mut BTreeMap<u64, TranscriptionResult>,
-    next_emit_index: &mut u64,
-    pending_jobs: &mut usize,
     last_emitted_transcript: &mut String,
 ) {
     while let Some(result) = worker.try_recv() {
-        pending_results.insert(result.index, result);
+        emit_worker_result(config, output, result, last_emitted_transcript);
     }
-    emit_ready_results(
-        config,
-        output,
-        pending_results,
-        next_emit_index,
-        pending_jobs,
-        last_emitted_transcript,
-    );
 }
 
 fn wait_for_pending_results(
-    worker: &TranscriptionWorker,
+    worker: &mut TranscriptionWorker,
     config: &DaemonConfig,
     output: &mut dyn DaemonOutput,
-    pending_results: &mut BTreeMap<u64, TranscriptionResult>,
-    next_emit_index: &mut u64,
-    pending_jobs: &mut usize,
     last_emitted_transcript: &mut String,
 ) {
-    while *pending_jobs > 0 {
-        drain_worker_results(
-            worker,
-            config,
-            output,
-            pending_results,
-            next_emit_index,
-            pending_jobs,
-            last_emitted_transcript,
-        );
-        if *pending_jobs == 0 {
-            break;
-        }
+    while worker.has_pending() {
         match worker.recv() {
-            Some(result) => {
-                pending_results.insert(result.index, result);
-                emit_ready_results(
-                    config,
-                    output,
-                    pending_results,
-                    next_emit_index,
-                    pending_jobs,
-                    last_emitted_transcript,
-                );
-            }
+            Some(result) => emit_worker_result(config, output, result, last_emitted_transcript),
             None => break,
         }
     }
 }
 
-fn emit_ready_results(
+fn emit_worker_result(
     config: &DaemonConfig,
     output: &mut dyn DaemonOutput,
-    pending_results: &mut BTreeMap<u64, TranscriptionResult>,
-    next_emit_index: &mut u64,
-    pending_jobs: &mut usize,
+    result: TranscriptionResult,
     last_emitted_transcript: &mut String,
 ) {
-    while let Some(result) = pending_results.remove(next_emit_index) {
-        *next_emit_index += 1;
-        *pending_jobs = pending_jobs.saturating_sub(1);
-        match result.transcript {
-            Ok(transcript) => {
-                let text = if result.had_overlap && !last_emitted_transcript.trim().is_empty() {
-                    segmentation::dedupe_boundary(last_emitted_transcript, &transcript)
-                } else {
-                    transcript
-                };
-                if !text.trim().is_empty() {
-                    if let Err(err) = emit_transcript(
-                        config,
-                        output,
-                        &text,
-                        audio::SegmentInfo {
-                            index: result.index,
-                            duration_ms: result.duration_ms,
-                        },
-                    ) {
-                        output.stderr(&format!("Failed to emit transcript: {err}"));
-                    } else {
-                        *last_emitted_transcript = text;
-                    }
-                }
+    match result.transcript {
+        Ok(transcript) => {
+            let text = if result.had_overlap && !last_emitted_transcript.trim().is_empty() {
+                segmentation::dedupe_boundary(last_emitted_transcript, &transcript)
+            } else {
+                transcript
+            };
+            if !text.trim().is_empty() {
+                emit_transcript(
+                    config,
+                    output,
+                    &text,
+                    audio::SegmentInfo {
+                        index: result.index,
+                        duration_ms: result.duration_ms,
+                    },
+                );
+                *last_emitted_transcript = text;
             }
-            Err(err) => output.stderr(&format!("Transcription error: {err}")),
         }
+        Err(err) => output.stderr(&format!("Transcription error: {err}")),
     }
 }
 
@@ -749,24 +666,20 @@ fn emit_transcript(
     output: &mut dyn DaemonOutput,
     text: &str,
     info: audio::SegmentInfo,
-) -> Result<(), String> {
-    match config.mode {
+) {
+    match config.output.mode {
         OutputMode::Stdout => emit_stdout(config.format, output, text, info),
         OutputMode::Clipboard => {
-            if let Err(err) = output::output_text(text, OutputMode::Clipboard, &config.output) {
+            if let Err(err) = output::output_text(text, &config.output) {
                 output.stderr(&format!("warn: {err}; falling back to stdout"));
                 emit_stdout(config.format, output, text, info)
-            } else {
-                Ok(())
             }
         }
-        mode @ (OutputMode::Paste | OutputMode::Type) => {
+        OutputMode::Paste | OutputMode::Type => {
             let insertion_text = segmentation::append_segment_space(text);
-            if let Err(err) = output::output_text(&insertion_text, mode, &config.output) {
+            if let Err(err) = output::output_text(&insertion_text, &config.output) {
                 output.stderr(&format!("warn: {err}; falling back to stdout"));
                 emit_stdout(config.format, output, text, info)
-            } else {
-                Ok(())
             }
         }
     }
@@ -789,30 +702,24 @@ fn emit_stdout(
     output: &mut dyn DaemonOutput,
     text: &str,
     info: audio::SegmentInfo,
-) -> Result<(), String> {
+) {
     match format {
         OutputFormat::Plain => {
             output.stdout(&format!("Transcript {}: {}", info.index, text));
         }
         OutputFormat::Jsonl => {
-            let escaped = json_escape(text);
-            let timestamp = Utc::now().to_rfc3339();
-            output.stdout(&format!(
-                "{{\"type\":\"final\",\"utterance\":{},\"duration_ms\":{},\"timestamp\":\"{}\",\"text\":\"{}\"}}",
-                info.index, info.duration_ms, timestamp, escaped
-            ));
+            output.stdout(
+                &serde_json::json!({
+                    "type": "final",
+                    "utterance": info.index,
+                    "duration_ms": info.duration_ms,
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "text": text,
+                })
+                .to_string(),
+            );
         }
     }
-    Ok(())
-}
-
-fn json_escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
 }
 
 fn dump_audio_samples(
@@ -919,30 +826,62 @@ pub fn start_socket_listener(
                 Ok(mut stream) => {
                     let mut buffer = String::new();
                     if let Err(err) = stream.read_to_string(&mut buffer) {
-                        eprintln!("socket read error: {err}");
+                        let _ = write_control_response(
+                            &mut stream,
+                            &ControlResponse::error(format!("socket read error: {err}")),
+                        );
                         continue;
                     }
                     let command = buffer.trim();
-                    if command == "record-start" {
-                        let _ = socket_sender.send(ControlEvent::StartRecording);
+                    let event = if command == "record-start" {
+                        Ok(ControlEvent::StartRecording)
                     } else if command == "record-stop" {
-                        let _ = socket_sender.send(ControlEvent::StopRecording);
+                        Ok(ControlEvent::StopRecording)
                     } else if command == "stop" {
-                        let _ = socket_sender.send(ControlEvent::Stop);
+                        Ok(ControlEvent::Stop)
+                    } else if command == "status" {
+                        Ok(ControlEvent::Status)
                     } else if command.starts_with("set-model") {
                         match parse_set_model_command(command) {
-                            Ok((size, model_language)) => {
-                                let _ = socket_sender.send(ControlEvent::SetModel {
-                                    size,
-                                    model_language,
-                                });
-                            }
-                            Err(message) => {
-                                eprintln!("invalid set-model command: {message}");
-                            }
+                            Ok((size, model_language)) => Ok(ControlEvent::SetModel {
+                                size,
+                                model_language,
+                            }),
+                            Err(message) => Err(message),
                         }
                     } else {
-                        eprintln!("unsupported daemon command: {command}");
+                        Err(format!("unsupported daemon command: {command}"))
+                    };
+
+                    let event = match event {
+                        Ok(event) => event,
+                        Err(message) => {
+                            let _ = write_control_response(
+                                &mut stream,
+                                &ControlResponse::error(message),
+                            );
+                            continue;
+                        }
+                    };
+
+                    let (response_sender, response_receiver) = mpsc::sync_channel(1);
+                    if socket_sender
+                        .send(ControlEvent::Request {
+                            event: Box::new(event),
+                            respond_to: response_sender,
+                        })
+                        .is_err()
+                    {
+                        let _ = write_control_response(
+                            &mut stream,
+                            &ControlResponse::error("daemon loop is unavailable"),
+                        );
+                        break;
+                    } else {
+                        let response = response_receiver.recv().unwrap_or_else(|_| {
+                            ControlResponse::error("daemon response channel closed")
+                        });
+                        let _ = write_control_response(&mut stream, &response);
                     }
                 }
                 Err(err) => {
@@ -957,19 +896,31 @@ pub fn start_socket_listener(
     Ok((guard, receiver, sender))
 }
 
+fn write_control_response(
+    stream: &mut UnixStream,
+    response: &ControlResponse,
+) -> Result<(), AppError> {
+    let mut line = serde_json::to_string(response)
+        .map_err(|err| AppError::runtime(format!("failed to serialize daemon response: {err}")))?;
+    line.push('\n');
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|err| AppError::runtime(format!("failed to write daemon response: {err}")))
+}
+
 fn parse_set_model_command(command: &str) -> Result<(ModelSize, ModelLanguage), String> {
     let mut size = None;
     let mut model_language = None;
     for token in command.split_whitespace().skip(1) {
         if let Some(value) = token.strip_prefix("size=") {
-            size = Some(parse_model_size(value).ok_or_else(|| {
+            size = Some(ModelSize::from_str(value, true).map_err(|_| {
                 format!("invalid model size '{value}' (expected auto|tiny|base|small|medium|large|large-v3-turbo)")
             })?);
         } else if let Some(value) = token.strip_prefix("model-language=") {
-            model_language =
-                Some(parse_model_language(value).ok_or_else(|| {
-                    format!("invalid model language '{value}' (expected auto|en)")
-                })?);
+            model_language = Some(
+                ModelLanguage::from_str(value, true)
+                    .map_err(|_| format!("invalid model language '{value}' (expected auto|en)"))?,
+            );
         }
     }
 
@@ -979,52 +930,31 @@ fn parse_set_model_command(command: &str) -> Result<(ModelSize, ModelLanguage), 
     Ok((size, model_language))
 }
 
-fn parse_model_size(value: &str) -> Option<ModelSize> {
-    match value {
-        "auto" => Some(ModelSize::Auto),
-        "tiny" => Some(ModelSize::Tiny),
-        "base" => Some(ModelSize::Base),
-        "small" => Some(ModelSize::Small),
-        "medium" => Some(ModelSize::Medium),
-        "large" => Some(ModelSize::Large),
-        "large-v3-turbo" => Some(ModelSize::LargeV3Turbo),
-        _ => None,
-    }
-}
-
-fn parse_model_language(value: &str) -> Option<ModelLanguage> {
-    match value {
-        "auto" => Some(ModelLanguage::Auto),
-        "en" => Some(ModelLanguage::En),
-        _ => None,
-    }
-}
-
-pub fn send_record_start_command() -> Result<(), AppError> {
+pub fn send_record_start_command() -> Result<ControlResponse, AppError> {
     send_daemon_command("record-start")
 }
 
-pub fn send_record_stop_command() -> Result<(), AppError> {
+pub fn send_record_stop_command() -> Result<ControlResponse, AppError> {
     send_daemon_command("record-stop")
 }
 
-pub fn send_stop_command() -> Result<(), AppError> {
+pub fn send_stop_command() -> Result<ControlResponse, AppError> {
     send_daemon_command("stop")
+}
+
+pub fn send_status_command() -> Result<ControlResponse, AppError> {
+    send_daemon_command("status")
 }
 
 pub fn send_set_model_command(
     size: ModelSize,
     model_language: ModelLanguage,
-) -> Result<(), AppError> {
-    let command = format!(
-        "set-model size={} model-language={}",
-        model_size_token(size),
-        model_language_token(model_language)
-    );
+) -> Result<ControlResponse, AppError> {
+    let command = format!("set-model size={size} model-language={model_language}");
     send_daemon_command(&command)
 }
 
-fn send_daemon_command(command: &str) -> Result<(), AppError> {
+fn send_daemon_command(command: &str) -> Result<ControlResponse, AppError> {
     let socket_path = daemon_socket_path()?;
     if !socket_path.exists() {
         return Err(AppError::runtime(format!(
@@ -1042,25 +972,31 @@ fn send_daemon_command(command: &str) -> Result<(), AppError> {
     stream
         .write_all(payload.as_bytes())
         .map_err(|err| AppError::runtime(format!("failed to send {command}: {err}")))?;
-    Ok(())
-}
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|err| AppError::runtime(format!("failed to finalize {command}: {err}")))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(600)))
+        .map_err(|err| AppError::runtime(format!("failed to configure daemon response: {err}")))?;
 
-fn model_size_token(size: ModelSize) -> &'static str {
-    match size {
-        ModelSize::Auto => "auto",
-        ModelSize::Tiny => "tiny",
-        ModelSize::Base => "base",
-        ModelSize::Small => "small",
-        ModelSize::Medium => "medium",
-        ModelSize::Large => "large",
-        ModelSize::LargeV3Turbo => "large-v3-turbo",
-    }
-}
-
-fn model_language_token(model_language: ModelLanguage) -> &'static str {
-    match model_language {
-        ModelLanguage::Auto => "auto",
-        ModelLanguage::En => "en",
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|err| AppError::runtime(format!("failed to read daemon response: {err}")))?;
+    let response: ControlResponse = serde_json::from_str(response.trim()).map_err(|err| {
+        AppError::runtime(format!(
+            "failed to parse daemon response for {command}: {err}"
+        ))
+    })?;
+    if response.ok {
+        Ok(response)
+    } else {
+        Err(AppError::runtime(
+            response
+                .message
+                .clone()
+                .unwrap_or_else(|| "daemon command failed".to_string()),
+        ))
     }
 }
 
@@ -1119,14 +1055,49 @@ impl Transcriber for WhisperTranscriber {
 pub mod test_support {
     use std::collections::VecDeque;
     use std::path::Path;
-    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
 
     use super::{
-        AudioBackend, CaptureSource, ControlEvent, DaemonOutput, Transcriber, TranscriberFactory,
+        AudioBackend, CaptureSource, DaemonConfig, DaemonOutput, Transcriber, TranscriberFactory,
     };
     use crate::audio::{AudioError, AudioErrorKind};
     use crate::error::AppError;
+    use crate::hotkey::HotkeyConfig;
+    use crate::output::{OutputConfig, OutputMode};
+    use crate::segmentation::{
+        DEFAULT_SEGMENT_GRACE_MS, DEFAULT_SEGMENT_MIN_MS, DEFAULT_SEGMENT_OVERLAP_MS,
+        DEFAULT_SEGMENT_TARGET_MS,
+    };
+    use crate::types::{AudioHost, OutputFormat, VadMode};
+
+    pub fn daemon_config() -> DaemonConfig {
+        DaemonConfig {
+            model_path: None,
+            download_model: false,
+            language: "en".to_string(),
+            device: None,
+            audio_host: AudioHost::Default,
+            sample_rate: 16_000,
+            format: OutputFormat::Plain,
+            output: OutputConfig {
+                mode: OutputMode::Stdout,
+                ..OutputConfig::default()
+            },
+            vad: VadMode::Off,
+            vad_silence_ms: 800,
+            vad_threshold: 0.015,
+            vad_chunk_ms: 250,
+            segment_target_ms: DEFAULT_SEGMENT_TARGET_MS,
+            segment_grace_ms: DEFAULT_SEGMENT_GRACE_MS,
+            segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
+            segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
+            debug_audio: false,
+            dump_audio: false,
+            audio_feedback: false,
+            no_speech_timeout_ms: 0,
+            hotkey: HotkeyConfig::default(),
+        }
+    }
 
     #[derive(Default)]
     pub struct TestOutput {
@@ -1277,10 +1248,6 @@ pub mod test_support {
             }
         }
     }
-
-    pub fn control_channel() -> (mpsc::Sender<ControlEvent>, mpsc::Receiver<ControlEvent>) {
-        mpsc::channel()
-    }
 }
 
 #[cfg(test)]
@@ -1294,16 +1261,12 @@ mod tests {
     use std::time::Duration;
 
     use super::test_support::{
-        control_channel, TestAudioBackend, TestOutput, TestTranscriberFactory,
-    };
-    use crate::segmentation::{
-        DEFAULT_SEGMENT_GRACE_MS, DEFAULT_SEGMENT_MIN_MS, DEFAULT_SEGMENT_OVERLAP_MS,
-        DEFAULT_SEGMENT_TARGET_MS,
+        daemon_config, TestAudioBackend, TestOutput, TestTranscriberFactory,
     };
 
     #[test]
     fn daemon_loop_emits_transcript_to_output() -> Result<(), AppError> {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1314,31 +1277,7 @@ mod tests {
             )),
             transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["hello".to_string()])),
         };
-        let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
-            sample_rate: 16_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
-            vad: VadMode::Off,
-            vad_silence_ms: 800,
-            vad_threshold: 0.015,
-            vad_chunk_ms: 250,
-            segment_target_ms: DEFAULT_SEGMENT_TARGET_MS,
-            segment_grace_ms: DEFAULT_SEGMENT_GRACE_MS,
-            segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
-            segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
-        };
+        let config = daemon_config();
 
         let shutdown_trigger = Arc::clone(&shutdown);
         let control_thread = thread::spawn(move || {
@@ -1360,9 +1299,89 @@ mod tests {
     }
 
     #[test]
+    fn no_speech_timeout_cancels_silent_recording() -> Result<(), AppError> {
+        let (sender, receiver) = mpsc::channel();
+        let control_sender = sender.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut output = TestOutput::default();
+        let deps = DaemonDeps {
+            audio: Box::new(TestAudioBackend::new(
+                vec!["Mic".to_string()],
+                vec![vec![0.0; 100]],
+            )),
+            transcriber_factory: Box::new(TestTranscriberFactory::new(Vec::new())),
+        };
+        let config = DaemonConfig {
+            sample_rate: 1_000,
+            no_speech_timeout_ms: 30,
+            ..daemon_config()
+        };
+
+        let shutdown_trigger = Arc::clone(&shutdown);
+        let control_thread = thread::spawn(move || {
+            let _ = control_sender.send(ControlEvent::StartRecording);
+            thread::sleep(Duration::from_millis(80));
+            shutdown_trigger.store(true, Ordering::Relaxed);
+        });
+
+        let result = run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown);
+        control_thread.join().expect("control thread failed");
+        result?;
+
+        assert!(output
+            .stdout_lines()
+            .iter()
+            .any(|line| line == "No speech detected, cancelled."));
+        Ok(())
+    }
+
+    #[test]
+    fn sustained_speech_prevents_no_speech_cancellation() -> Result<(), AppError> {
+        let (sender, receiver) = mpsc::channel();
+        let control_sender = sender.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut output = TestOutput::default();
+        let deps = DaemonDeps {
+            audio: Box::new(TestAudioBackend::new(
+                vec!["Mic".to_string()],
+                vec![vec![0.2; 100]],
+            )),
+            transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["speech".to_string()])),
+        };
+        let config = DaemonConfig {
+            sample_rate: 1_000,
+            no_speech_timeout_ms: 30,
+            ..daemon_config()
+        };
+
+        let shutdown_trigger = Arc::clone(&shutdown);
+        let control_thread = thread::spawn(move || {
+            let _ = control_sender.send(ControlEvent::StartRecording);
+            thread::sleep(Duration::from_millis(80));
+            let _ = control_sender.send(ControlEvent::StopRecording);
+            thread::sleep(Duration::from_millis(20));
+            shutdown_trigger.store(true, Ordering::Relaxed);
+        });
+
+        let result = run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown);
+        control_thread.join().expect("control thread failed");
+        result?;
+
+        assert!(!output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("No speech detected")));
+        assert!(output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("Transcript 1: speech")));
+        Ok(())
+    }
+
+    #[test]
     fn hold_recording_continuous_mode_transcribes_on_pause_before_release() -> Result<(), AppError>
     {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1376,29 +1395,10 @@ mod tests {
             ])),
         };
         let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
-            sample_rate: 16_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
             vad: VadMode::Continuous,
             vad_silence_ms: 20,
-            vad_threshold: 0.015,
             vad_chunk_ms: 20,
-            segment_target_ms: DEFAULT_SEGMENT_TARGET_MS,
-            segment_grace_ms: DEFAULT_SEGMENT_GRACE_MS,
-            segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
-            segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
+            ..daemon_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1423,7 +1423,7 @@ mod tests {
 
     #[test]
     fn continuous_mode_transcribes_long_speech_before_release() -> Result<(), AppError> {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let (transcript_sender, transcript_receiver) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -1442,29 +1442,15 @@ mod tests {
             ])),
         };
         let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
             sample_rate: 1_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
             vad: VadMode::Continuous,
             vad_silence_ms: 100,
-            vad_threshold: 0.015,
             vad_chunk_ms: 20,
             segment_target_ms: 20,
             segment_grace_ms: 20,
             segment_overlap_ms: 5,
             segment_min_ms: 10,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
+            ..daemon_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1500,7 +1486,7 @@ mod tests {
 
     #[test]
     fn carried_speech_overlap_is_deduped_on_following_silence_segment() -> Result<(), AppError> {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1515,29 +1501,15 @@ mod tests {
             ])),
         };
         let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
             sample_rate: 1_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
             vad: VadMode::Continuous,
             vad_silence_ms: 20,
-            vad_threshold: 0.015,
             vad_chunk_ms: 20,
             segment_target_ms: 20,
             segment_grace_ms: 200,
             segment_overlap_ms: 10,
             segment_min_ms: 10,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
+            ..daemon_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1570,7 +1542,7 @@ mod tests {
 
     #[test]
     fn carried_silence_overlap_does_not_dedupe_following_segment() -> Result<(), AppError> {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1585,29 +1557,15 @@ mod tests {
             ])),
         };
         let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
             sample_rate: 1_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
             vad: VadMode::Continuous,
             vad_silence_ms: 20,
-            vad_threshold: 0.015,
             vad_chunk_ms: 20,
             segment_target_ms: 20,
             segment_grace_ms: 200,
             segment_overlap_ms: 5,
             segment_min_ms: 10,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
+            ..daemon_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1655,7 +1613,7 @@ mod tests {
         fs::create_dir_all(model_path.parent().expect("model parent")).expect("create model dir");
         fs::write(&model_path, b"test model").expect("write model file");
 
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1669,31 +1627,7 @@ mod tests {
                 load_count: Arc::new(AtomicUsize::new(0)),
             }),
         };
-        let config = DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
-            sample_rate: 16_000,
-            format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
-            vad: VadMode::Off,
-            vad_silence_ms: 800,
-            vad_threshold: 0.015,
-            vad_chunk_ms: 250,
-            segment_target_ms: DEFAULT_SEGMENT_TARGET_MS,
-            segment_grace_ms: DEFAULT_SEGMENT_GRACE_MS,
-            segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
-            segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
-            debug_audio: false,
-            debug_vad: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
-        };
+        let config = daemon_config();
 
         let shutdown_trigger = Arc::clone(&shutdown);
         let control_thread = thread::spawn(move || {

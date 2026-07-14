@@ -8,29 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      web: ${{ steps.filter.outputs.web }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            rust:
-              - '**/*.rs'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'build.rs'
-            web:
-              - 'web/**'
-
-  rust-checks:
-    needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+  ci-gate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -48,66 +26,3 @@ jobs:
         run: mise run prepare-dev
       - name: Run quality gates
         run: mise run ci
-
-  web-checks:
-    needs: changes
-    if: ${{ needs.changes.outputs.web == 'true' }}
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: web/package-lock.json
-      - name: Install dependencies
-        run: npm ci
-      - name: Lint
-        run: npm run lint
-      - name: Build
-        run: npm run build
-      - name: Test UI
-        run: npm run test:ui
-
-  ci-gate:
-    needs: [changes, rust-checks, web-checks]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify CI gate
-        run: |
-          RUST_NEEDED="${{ needs.changes.outputs.rust }}"
-          WEB_NEEDED="${{ needs.changes.outputs.web }}"
-          RUST_RESULT="${{ needs.rust-checks.result }}"
-          WEB_RESULT="${{ needs.web-checks.result }}"
-
-          EXIT_CODE=0
-
-          if [ "$RUST_NEEDED" == "true" ]; then
-            if [ "$RUST_RESULT" != "success" ]; then
-              echo "❌ Rust checks failed or were cancelled"
-              EXIT_CODE=1
-            else
-              echo "✓ Rust checks passed"
-            fi
-          else
-            echo "⊘ Rust checks skipped (no Rust files changed)"
-          fi
-
-          if [ "$WEB_NEEDED" == "true" ]; then
-            if [ "$WEB_RESULT" != "success" ]; then
-              echo "❌ Web checks failed or were cancelled"
-              EXIT_CODE=1
-            else
-              echo "✓ Web checks passed"
-            fi
-          else
-            echo "⊘ Web checks skipped (no web files changed)"
-          fi
-
-          exit $EXIT_CODE

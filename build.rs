@@ -79,8 +79,6 @@ fn main() {
         .clang_arg(format!("-I{}", whisper_dir.join("ggml/include").display()))
         .allowlist_function("whisper_context_default_params")
         .allowlist_function("whisper_init_from_file_with_params")
-        .allowlist_function("whisper_full_default_params")
-        .allowlist_function("whisper_full")
         .allowlist_function("whisper_full_n_segments")
         .allowlist_function("whisper_full_get_segment_text")
         .allowlist_function("whisper_free")

@@ -17,19 +17,17 @@ pub const DEFAULT_CHUNK_MS: u64 = 100;
 pub const DEFAULT_VAD_THRESHOLD: f32 = 0.010;
 pub const DEFAULT_SILENCE_TIMEOUT_MS: u64 = 1200;
 
-pub struct VadConfig {
-    pub enabled: bool,
-    pub energy_threshold: f32,
-    pub silence_timeout: Duration,
-    pub chunk_size: Duration,
-    #[allow(dead_code)]
-    pub debug: bool,
+pub(crate) struct VadConfig {
+    pub(crate) enabled: bool,
+    pub(crate) energy_threshold: f32,
+    pub(crate) silence_timeout: Duration,
+    pub(crate) chunk_size: Duration,
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct SegmentInfo {
-    pub index: u64,
-    pub duration_ms: u64,
+pub(crate) struct SegmentInfo {
+    pub(crate) index: u64,
+    pub(crate) duration_ms: u64,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -66,19 +64,17 @@ impl fmt::Display for AudioError {
 impl Error for AudioError {}
 
 impl VadConfig {
-    pub fn new(
+    pub(crate) fn new(
         enabled: bool,
         silence_timeout_ms: u64,
         energy_threshold: f32,
         chunk_ms: u64,
-        debug: bool,
     ) -> Self {
         Self {
             enabled,
             energy_threshold,
             silence_timeout: Duration::from_millis(silence_timeout_ms),
             chunk_size: Duration::from_millis(chunk_ms),
-            debug,
         }
     }
 }
@@ -269,7 +265,11 @@ pub fn drain_samples(capture: &mut Capture, output: &mut Vec<f32>) {
     }
 }
 
-pub fn trim_trailing_silence(samples: &[f32], sample_rate: u32, vad: &VadConfig) -> Vec<f32> {
+pub(crate) fn trim_trailing_silence(
+    samples: &[f32],
+    sample_rate: u32,
+    vad: &VadConfig,
+) -> Vec<f32> {
     if samples.is_empty() || !vad.enabled {
         return samples.to_vec();
     }
@@ -365,51 +365,6 @@ impl SpeechDetector {
     pub fn speech_samples(&self) -> usize {
         self.speech_samples
     }
-
-    /// Get the RMS of samples (for debugging)
-    pub fn analyze(&self, samples: &[f32]) -> SpeechAnalysis {
-        let rms = rms_energy(samples);
-        SpeechAnalysis {
-            rms,
-            threshold: self.threshold,
-            above_threshold: rms >= self.threshold,
-            samples_len: samples.len(),
-            accumulated_speech_samples: self.speech_samples,
-            confirm_samples_needed: self.confirm_samples,
-            detected: self.detected,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct SpeechAnalysis {
-    pub rms: f32,
-    pub threshold: f32,
-    pub above_threshold: bool,
-    pub samples_len: usize,
-    pub accumulated_speech_samples: usize,
-    pub confirm_samples_needed: usize,
-    pub detected: bool,
-}
-
-impl std::fmt::Display for SpeechAnalysis {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "RMS: {:.6} (threshold: {:.6}, {}), samples: {}, accumulated: {}/{}, detected: {}",
-            self.rms,
-            self.threshold,
-            if self.above_threshold {
-                "ABOVE"
-            } else {
-                "below"
-            },
-            self.samples_len,
-            self.accumulated_speech_samples,
-            self.confirm_samples_needed,
-            self.detected
-        )
-    }
 }
 
 fn duration_to_samples(sample_rate: u32, duration: Duration) -> usize {
@@ -490,12 +445,7 @@ fn select_stream_config(
         let format = config.sample_format();
         let candidate = (stream_config, format);
         let rank = sample_format_rank(format);
-        if channels == 1 {
-            if best.is_none() || rank > best_rank {
-                best = Some(candidate);
-                best_rank = rank;
-            }
-        } else if best.is_none() || rank > best_rank {
+        if best.is_none() || rank > best_rank {
             best = Some(candidate);
             best_rank = rank;
         }
@@ -513,7 +463,7 @@ fn sample_format_rank(format: cpal::SampleFormat) -> u8 {
     match format {
         cpal::SampleFormat::F32 => 6,
         cpal::SampleFormat::F64 => 5,
-        cpal::SampleFormat::I32 => 4,
+        cpal::SampleFormat::I32 | cpal::SampleFormat::U32 => 4,
         cpal::SampleFormat::I16 => 3,
         cpal::SampleFormat::U16 => 2,
         cpal::SampleFormat::I8 => 1,
@@ -647,5 +597,13 @@ mod speech_detector_tests {
         detector.reset();
         assert!(!detector.is_detected());
         assert_eq!(detector.speech_samples(), 0);
+    }
+
+    #[test]
+    fn unsigned_32_bit_samples_rank_with_signed_32_bit_samples() {
+        assert_eq!(
+            sample_format_rank(cpal::SampleFormat::U32),
+            sample_format_rank(cpal::SampleFormat::I32)
+        );
     }
 }

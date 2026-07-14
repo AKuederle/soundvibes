@@ -15,7 +15,7 @@ use sv::segmentation::{
     DEFAULT_SEGMENT_GRACE_MS, DEFAULT_SEGMENT_MIN_MS, DEFAULT_SEGMENT_OVERLAP_MS,
     DEFAULT_SEGMENT_TARGET_MS,
 };
-use sv::types::{AudioHost, OutputFormat, VadMode, VadSetting};
+use sv::types::{AudioHost, OutputFormat, VadMode};
 
 #[derive(Parser, Debug)]
 #[command(name = "sv", version, about = "Offline speech-to-text CLI")]
@@ -102,9 +102,6 @@ struct Cli {
     debug_audio: bool,
 
     #[arg(long, default_value_t = false, global = true)]
-    debug_vad: bool,
-
-    #[arg(long, default_value_t = false, global = true)]
     list_devices: bool,
 
     #[arg(long, default_value_t = false, global = true)]
@@ -142,6 +139,7 @@ enum CliCommand {
 #[derive(Subcommand, Debug, Copy, Clone, PartialEq, Eq)]
 enum DaemonCommand {
     Start,
+    Status,
     Stop,
     #[command(name = "set-model")]
     SetModel {
@@ -157,6 +155,7 @@ enum DaemonCommand {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum CliMode {
     RunDaemon,
+    StatusDaemon,
     StopDaemon,
     ShowTranscriptPath,
     SetModel {
@@ -172,6 +171,9 @@ fn resolve_cli_mode(cli: &Cli) -> CliMode {
         Some(CliCommand::Daemon {
             command: DaemonCommand::Start,
         }) => CliMode::RunDaemon,
+        Some(CliCommand::Daemon {
+            command: DaemonCommand::Status,
+        }) => CliMode::StatusDaemon,
         Some(CliCommand::Daemon {
             command: DaemonCommand::Stop,
         }) => CliMode::StopDaemon,
@@ -201,47 +203,38 @@ fn resolve_cli_mode(cli: &Cli) -> CliMode {
 
 #[derive(Debug, Clone)]
 struct Config {
-    model_path: Option<PathBuf>,
     model_size: ModelSize,
     model_language: ModelLanguage,
-    download_model: bool,
-    language: String,
-    device: Option<String>,
-    audio_host: AudioHost,
-    sample_rate: u32,
-    format: OutputFormat,
-    mode: OutputMode,
-    output: OutputConfig,
-    vad: VadMode,
-    vad_silence_ms: u64,
-    vad_threshold: f32,
-    vad_chunk_ms: u64,
-    segment_target_ms: u64,
-    segment_grace_ms: u64,
-    segment_overlap_ms: u64,
-    segment_min_ms: u64,
-    debug_audio: bool,
-    debug_vad: bool,
-    list_devices: bool,
-    dump_audio: bool,
-    audio_feedback: bool,
-    no_speech_timeout_ms: u64,
-    hotkey: HotkeyConfig,
+    daemon: daemon::DaemonConfig,
+}
+
+struct ConfigSources<'a> {
+    matches: &'a clap::ArgMatches,
+}
+
+impl ConfigSources<'_> {
+    fn value<T>(&self, name: &str, cli: T, file: Option<T>) -> T {
+        if self.matches.value_source(name) == Some(ValueSource::CommandLine) {
+            cli
+        } else {
+            file.unwrap_or(cli)
+        }
+    }
+
+    fn optional<T>(&self, name: &str, cli: Option<T>, file: Option<T>) -> Option<T> {
+        if self.matches.value_source(name) == Some(ValueSource::CommandLine) {
+            cli
+        } else {
+            cli.or(file)
+        }
+    }
 }
 
 impl Config {
     fn from_sources(cli: Cli, matches: &clap::ArgMatches, file: FileConfig) -> Self {
-        let language = if matches.value_source("language") == Some(ValueSource::CommandLine) {
-            cli.language
-        } else {
-            file.language.unwrap_or(cli.language)
-        };
-
-        let model_size = if matches.value_source("model_size") == Some(ValueSource::CommandLine) {
-            cli.model_size
-        } else {
-            file.model_size.unwrap_or(cli.model_size)
-        };
+        let sources = ConfigSources { matches };
+        let language = sources.value("language", cli.language, file.language);
+        let model_size = sources.value("model_size", cli.model_size, file.model_size);
 
         let (model_language, model_language_explicit) =
             if matches.value_source("model_language") == Some(ValueSource::CommandLine) {
@@ -259,224 +252,107 @@ impl Config {
             model_language_for_transcription(&language)
         };
 
-        let device = if matches.value_source("device") == Some(ValueSource::CommandLine) {
-            cli.device
-        } else {
-            cli.device.or(file.device)
-        };
-
-        let audio_host = if matches.value_source("audio_host") == Some(ValueSource::CommandLine) {
-            cli.audio_host
-                .unwrap_or_else(AudioHost::default_for_platform)
-        } else {
-            file.audio_host
-                .or(cli.audio_host)
-                .unwrap_or_else(AudioHost::default_for_platform)
-        };
-
-        let sample_rate = if matches.value_source("sample_rate") == Some(ValueSource::CommandLine) {
-            cli.sample_rate
-        } else {
-            file.sample_rate.unwrap_or(cli.sample_rate)
-        };
-
-        let format = if matches.value_source("format") == Some(ValueSource::CommandLine) {
-            cli.format
-        } else {
-            file.format.unwrap_or(cli.format)
-        };
+        let device = sources.optional("device", cli.device, file.device);
+        let audio_host = sources
+            .optional("audio_host", cli.audio_host, file.audio_host)
+            .unwrap_or_else(AudioHost::default_for_platform);
+        let sample_rate = sources.value("sample_rate", cli.sample_rate, file.sample_rate);
+        let format = sources.value("format", cli.format, file.format);
 
         let output_file = file.output.unwrap_or_default();
-        let mode = if matches.value_source("mode") == Some(ValueSource::CommandLine) {
-            cli.mode
-        } else {
-            output_file.mode.unwrap_or(cli.mode)
-        };
         let output = OutputConfig {
-            paste_keys: if matches.value_source("paste_keys") == Some(ValueSource::CommandLine) {
-                cli.paste_keys
-            } else {
-                output_file.paste_keys.unwrap_or(cli.paste_keys)
-            },
-            restore_clipboard: if matches.value_source("restore_clipboard")
-                == Some(ValueSource::CommandLine)
-            {
-                cli.restore_clipboard
-            } else {
-                output_file
-                    .restore_clipboard
-                    .unwrap_or(cli.restore_clipboard)
-            },
-            pre_paste_delay_ms: if matches.value_source("pre_paste_delay_ms")
-                == Some(ValueSource::CommandLine)
-            {
-                cli.pre_paste_delay_ms
-            } else {
-                output_file
-                    .pre_paste_delay_ms
-                    .unwrap_or(cli.pre_paste_delay_ms)
-            },
-            restore_clipboard_delay_ms: if matches.value_source("restore_clipboard_delay_ms")
-                == Some(ValueSource::CommandLine)
-            {
-                cli.restore_clipboard_delay_ms
-            } else {
-                output_file
-                    .restore_clipboard_delay_ms
-                    .unwrap_or(cli.restore_clipboard_delay_ms)
-            },
+            mode: sources.value("mode", cli.mode, Some(output_file.mode)),
+            paste_keys: sources.value("paste_keys", cli.paste_keys, Some(output_file.paste_keys)),
+            restore_clipboard: sources.value(
+                "restore_clipboard",
+                cli.restore_clipboard,
+                Some(output_file.restore_clipboard),
+            ),
+            pre_paste_delay_ms: sources.value(
+                "pre_paste_delay_ms",
+                cli.pre_paste_delay_ms,
+                Some(output_file.pre_paste_delay_ms),
+            ),
+            restore_clipboard_delay_ms: sources.value(
+                "restore_clipboard_delay_ms",
+                cli.restore_clipboard_delay_ms,
+                Some(output_file.restore_clipboard_delay_ms),
+            ),
         };
 
-        let vad = if matches.value_source("vad") == Some(ValueSource::CommandLine) {
-            cli.vad
-        } else {
-            file.vad.map(VadSetting::into_mode).unwrap_or(cli.vad)
-        };
-
+        let vad = sources.value("vad", cli.vad, file.vad);
         let vad_silence_ms =
-            if matches.value_source("vad_silence_ms") == Some(ValueSource::CommandLine) {
-                cli.vad_silence_ms
-            } else {
-                file.vad_silence_ms.unwrap_or(cli.vad_silence_ms)
-            };
-
-        let vad_threshold =
-            if matches.value_source("vad_threshold") == Some(ValueSource::CommandLine) {
-                cli.vad_threshold
-            } else {
-                file.vad_threshold.unwrap_or(cli.vad_threshold)
-            };
-
-        let vad_chunk_ms = if matches.value_source("vad_chunk_ms") == Some(ValueSource::CommandLine)
-        {
-            cli.vad_chunk_ms
-        } else {
-            file.vad_chunk_ms.unwrap_or(cli.vad_chunk_ms)
-        };
-
-        let segment_target_ms =
-            if matches.value_source("segment_target_ms") == Some(ValueSource::CommandLine) {
-                cli.segment_target_ms
-            } else {
-                file.segment_target_ms.unwrap_or(cli.segment_target_ms)
-            };
-
-        let segment_grace_ms =
-            if matches.value_source("segment_grace_ms") == Some(ValueSource::CommandLine) {
-                cli.segment_grace_ms
-            } else {
-                file.segment_grace_ms.unwrap_or(cli.segment_grace_ms)
-            };
-
-        let segment_overlap_ms =
-            if matches.value_source("segment_overlap_ms") == Some(ValueSource::CommandLine) {
-                cli.segment_overlap_ms
-            } else {
-                file.segment_overlap_ms.unwrap_or(cli.segment_overlap_ms)
-            };
-
+            sources.value("vad_silence_ms", cli.vad_silence_ms, file.vad_silence_ms);
+        let vad_threshold = sources.value("vad_threshold", cli.vad_threshold, file.vad_threshold);
+        let vad_chunk_ms = sources.value("vad_chunk_ms", cli.vad_chunk_ms, file.vad_chunk_ms);
+        let segment_target_ms = sources.value(
+            "segment_target_ms",
+            cli.segment_target_ms,
+            file.segment_target_ms,
+        );
+        let segment_grace_ms = sources.value(
+            "segment_grace_ms",
+            cli.segment_grace_ms,
+            file.segment_grace_ms,
+        );
+        let segment_overlap_ms = sources.value(
+            "segment_overlap_ms",
+            cli.segment_overlap_ms,
+            file.segment_overlap_ms,
+        );
         let segment_min_ms =
-            if matches.value_source("segment_min_ms") == Some(ValueSource::CommandLine) {
-                cli.segment_min_ms
-            } else {
-                file.segment_min_ms.unwrap_or(cli.segment_min_ms)
-            };
-
-        let debug_audio = if matches.value_source("debug_audio") == Some(ValueSource::CommandLine) {
-            cli.debug_audio
-        } else {
-            file.debug_audio.unwrap_or(cli.debug_audio)
-        };
-
-        let debug_vad = if matches.value_source("debug_vad") == Some(ValueSource::CommandLine) {
-            cli.debug_vad
-        } else {
-            file.debug_vad.unwrap_or(cli.debug_vad)
-        };
-
-        let list_devices = if matches.value_source("list_devices") == Some(ValueSource::CommandLine)
-        {
-            cli.list_devices
-        } else {
-            file.list_devices.unwrap_or(cli.list_devices)
-        };
-
-        let dump_audio = if matches.value_source("dump_audio") == Some(ValueSource::CommandLine) {
-            cli.dump_audio
-        } else {
-            file.dump_audio.unwrap_or(cli.dump_audio)
-        };
-
+            sources.value("segment_min_ms", cli.segment_min_ms, file.segment_min_ms);
+        let debug_audio = sources.value("debug_audio", cli.debug_audio, file.debug_audio);
+        let dump_audio = sources.value("dump_audio", cli.dump_audio, file.dump_audio);
         let audio_feedback =
-            if matches.value_source("audio_feedback") == Some(ValueSource::CommandLine) {
-                cli.audio_feedback
-            } else {
-                file.audio_feedback.unwrap_or(cli.audio_feedback)
-            };
-
-        let no_speech_timeout_ms =
-            if matches.value_source("no_speech_timeout_ms") == Some(ValueSource::CommandLine) {
-                cli.no_speech_timeout_ms
-            } else {
-                file.no_speech_timeout_ms
-                    .unwrap_or(cli.no_speech_timeout_ms)
-            };
+            sources.value("audio_feedback", cli.audio_feedback, file.audio_feedback);
+        let no_speech_timeout_ms = sources.value(
+            "no_speech_timeout_ms",
+            cli.no_speech_timeout_ms,
+            file.no_speech_timeout_ms,
+        );
 
         let hotkey_file = file.hotkey.unwrap_or_default();
         let hotkey = HotkeyConfig {
-            enabled: if matches.value_source("hotkey_enabled") == Some(ValueSource::CommandLine) {
-                cli.hotkey_enabled
-            } else {
-                hotkey_file.enabled
-            },
-            key: if matches.value_source("hotkey_key") == Some(ValueSource::CommandLine) {
-                cli.hotkey_key
-            } else {
-                hotkey_file.key
-            },
+            enabled: sources.value(
+                "hotkey_enabled",
+                cli.hotkey_enabled,
+                Some(hotkey_file.enabled),
+            ),
+            key: sources.optional("hotkey_key", cli.hotkey_key, hotkey_file.key),
         };
 
         let download_model =
-            if matches.value_source("download_model") == Some(ValueSource::CommandLine) {
-                cli.download_model
-            } else {
-                file.download_model.unwrap_or(cli.download_model)
-            };
-
+            sources.value("download_model", cli.download_model, file.download_model);
         let file_model_path = file.model_path.or(file.model);
-        let model_path = if matches.value_source("model") == Some(ValueSource::CommandLine) {
-            cli.model
-        } else {
-            cli.model.or(file_model_path)
-        };
+        let model_path = sources.optional("model", cli.model, file_model_path);
 
         Self {
-            model_path,
             model_size,
             model_language,
-            download_model,
-            language,
-            device,
-            audio_host,
-            sample_rate,
-            format,
-            mode,
-            output,
-            vad,
-            vad_silence_ms,
-            vad_threshold,
-            vad_chunk_ms,
-            segment_target_ms,
-            segment_grace_ms,
-            segment_overlap_ms,
-            segment_min_ms,
-            debug_audio,
-            debug_vad,
-            list_devices,
-            dump_audio,
-            audio_feedback,
-            no_speech_timeout_ms,
-            hotkey,
+            daemon: daemon::DaemonConfig {
+                model_path,
+                download_model,
+                language,
+                device,
+                audio_host,
+                sample_rate,
+                format,
+                output,
+                vad,
+                vad_silence_ms,
+                vad_threshold,
+                vad_chunk_ms,
+                segment_target_ms,
+                segment_grace_ms,
+                segment_overlap_ms,
+                segment_min_ms,
+                debug_audio,
+                dump_audio,
+                audio_feedback,
+                no_speech_timeout_ms,
+                hotkey,
+            },
         }
     }
 }
@@ -494,8 +370,8 @@ struct FileConfig {
     audio_host: Option<AudioHost>,
     sample_rate: Option<u32>,
     format: Option<OutputFormat>,
-    output: Option<FileOutputConfig>,
-    vad: Option<VadSetting>,
+    output: Option<OutputConfig>,
+    vad: Option<VadMode>,
     vad_silence_ms: Option<u64>,
     vad_threshold: Option<f32>,
     vad_chunk_ms: Option<u64>,
@@ -504,22 +380,10 @@ struct FileConfig {
     segment_overlap_ms: Option<u64>,
     segment_min_ms: Option<u64>,
     debug_audio: Option<bool>,
-    debug_vad: Option<bool>,
-    list_devices: Option<bool>,
     dump_audio: Option<bool>,
     audio_feedback: Option<bool>,
     no_speech_timeout_ms: Option<u64>,
     hotkey: Option<HotkeyConfig>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct FileOutputConfig {
-    mode: Option<OutputMode>,
-    paste_keys: Option<String>,
-    restore_clipboard: Option<bool>,
-    pre_paste_delay_ms: Option<u64>,
-    restore_clipboard_delay_ms: Option<u64>,
 }
 
 fn main() {
@@ -527,6 +391,20 @@ fn main() {
     let cli = Cli::from_arg_matches(&matches).expect("Failed to parse CLI arguments");
     let mode = resolve_cli_mode(&cli);
     match mode {
+        CliMode::StatusDaemon => {
+            match daemon::send_status_command() {
+                Ok(response) => println!(
+                    "state={} language={}",
+                    response.state.as_deref().unwrap_or("unknown"),
+                    response.language.as_deref().unwrap_or("unknown")
+                ),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    process::exit(err.exit_code());
+                }
+            }
+            return;
+        }
         CliMode::StopDaemon => {
             if let Err(err) = daemon::send_stop_command() {
                 eprintln!("error: {err}");
@@ -558,21 +436,22 @@ fn main() {
         }
     };
     let mut config = Config::from_sources(cli, &matches, file_config);
-    if mode == CliMode::RunDaemon {
-        config.list_devices = false;
-    }
 
-    let prepared_model = if config.list_devices {
-        None
-    } else {
+    let prepared_model = if mode == CliMode::RunDaemon {
         let spec = ModelSpec::new(config.model_size, config.model_language);
-        match sv::model::prepare_model(config.model_path.as_deref(), &spec, config.download_model) {
+        match sv::model::prepare_model(
+            config.daemon.model_path.as_deref(),
+            &spec,
+            config.daemon.download_model,
+        ) {
             Ok(prepared) => Some(prepared),
             Err(err) => {
                 eprintln!("error: {err}");
                 process::exit(err.exit_code());
             }
         }
+    } else {
+        None
     };
 
     println!("SoundVibes sv {}", env!("CARGO_PKG_VERSION"));
@@ -582,60 +461,33 @@ fn main() {
         }
         println!("Model: {}", prepared.path.display());
     }
-    println!("Language: {}", config.language);
-    println!("Sample rate: {} Hz", config.sample_rate);
-    println!("Format: {:?}", config.format);
-    println!("Mode: {:?}", config.mode);
-    println!("VAD: {:?}", config.vad);
-    println!("VAD silence timeout: {} ms", config.vad_silence_ms);
-    println!("VAD threshold: {:.4}", config.vad_threshold);
-    println!("VAD chunk: {} ms", config.vad_chunk_ms);
-    println!("Segment target: {} ms", config.segment_target_ms);
-    println!("Segment grace: {} ms", config.segment_grace_ms);
-    println!("Segment overlap: {} ms", config.segment_overlap_ms);
-    println!("Segment minimum: {} ms", config.segment_min_ms);
-    println!("Dump audio: {}", config.dump_audio);
-    println!("Audio host: {:?}", config.audio_host);
-    if let Some(device) = &config.device {
+    println!("Language: {}", config.daemon.language);
+    println!("Sample rate: {} Hz", config.daemon.sample_rate);
+    println!("Format: {:?}", config.daemon.format);
+    println!("Mode: {:?}", config.daemon.output.mode);
+    println!("VAD: {:?}", config.daemon.vad);
+    println!("VAD silence timeout: {} ms", config.daemon.vad_silence_ms);
+    println!("VAD threshold: {:.4}", config.daemon.vad_threshold);
+    println!("VAD chunk: {} ms", config.daemon.vad_chunk_ms);
+    println!("Segment target: {} ms", config.daemon.segment_target_ms);
+    println!("Segment grace: {} ms", config.daemon.segment_grace_ms);
+    println!("Segment overlap: {} ms", config.daemon.segment_overlap_ms);
+    println!("Segment minimum: {} ms", config.daemon.segment_min_ms);
+    println!("Dump audio: {}", config.daemon.dump_audio);
+    println!("Audio host: {:?}", config.daemon.audio_host);
+    if let Some(device) = &config.daemon.device {
         println!("Device: {device}");
     }
 
-    let result = if config.list_devices {
-        run_list_devices(&config)
+    let result = if mode == CliMode::ListDevices {
+        run_list_devices(&config.daemon)
     } else if mode == CliMode::TestAudio {
-        run_test_audio(&config)
+        run_test_audio(&config.daemon)
     } else {
-        let model_path = prepared_model
-            .as_ref()
-            .map(|prepared| prepared.path.clone());
-        let daemon_config = daemon::DaemonConfig {
-            model_path,
-            download_model: config.download_model,
-            language: config.language.clone(),
-            device: config.device.clone(),
-            audio_host: config.audio_host,
-            sample_rate: config.sample_rate,
-            format: config.format,
-            mode: config.mode,
-            output: config.output.clone(),
-            vad: config.vad,
-            vad_silence_ms: config.vad_silence_ms,
-            vad_threshold: config.vad_threshold,
-            vad_chunk_ms: config.vad_chunk_ms,
-            segment_target_ms: config.segment_target_ms,
-            segment_grace_ms: config.segment_grace_ms,
-            segment_overlap_ms: config.segment_overlap_ms,
-            segment_min_ms: config.segment_min_ms,
-            debug_audio: config.debug_audio,
-            debug_vad: config.debug_vad,
-            dump_audio: config.dump_audio,
-            audio_feedback: config.audio_feedback,
-            no_speech_timeout_ms: config.no_speech_timeout_ms,
-            hotkey: config.hotkey.clone(),
-        };
+        config.daemon.model_path = prepared_model.map(|prepared| prepared.path);
         let deps = daemon::DaemonDeps::default();
         let mut output = daemon::StdoutOutput;
-        daemon::run_daemon(&daemon_config, &deps, &mut output)
+        daemon::run_daemon(&config.daemon, &deps, &mut output)
     };
 
     if let Err(err) = result {
@@ -645,9 +497,8 @@ fn main() {
 }
 
 fn load_config_file() -> Result<FileConfig, AppError> {
-    let path = match config_path() {
-        Some(path) => path,
-        None => return Ok(FileConfig::default()),
+    let Some(path) = config_path() else {
+        return Ok(FileConfig::default());
     };
 
     if !path.exists() {
@@ -675,7 +526,7 @@ fn config_path() -> Option<PathBuf> {
     Some(config_home.join("soundvibes").join("config.toml"))
 }
 
-fn run_list_devices(config: &Config) -> Result<(), AppError> {
+fn run_list_devices(config: &daemon::DaemonConfig) -> Result<(), AppError> {
     let host = daemon::select_audio_host(config.audio_host)?;
     audio::configure_alsa_logging(config.debug_audio);
     let devices = audio::list_input_devices(&host).map_err(|err| AppError::audio(err.message))?;
@@ -686,7 +537,7 @@ fn run_list_devices(config: &Config) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_test_audio(config: &Config) -> Result<(), AppError> {
+fn run_test_audio(config: &daemon::DaemonConfig) -> Result<(), AppError> {
     use std::io::Write;
 
     let host = daemon::select_audio_host(config.audio_host)?;
@@ -696,6 +547,8 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
         .map_err(|err| AppError::audio(err.message))?;
 
     let confirm_samples = (0.1 * config.sample_rate as f32) as usize; // 100ms
+    let mut speech_detector =
+        audio::SpeechDetector::new(config.vad_threshold, 100, config.sample_rate);
 
     println!(
         "Testing audio levels. Threshold: {:.4}",
@@ -709,7 +562,6 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
     println!("{:-<10} {:-<10} {:-<12} {:-<8}", "", "", "", "");
 
     let mut buffer = Vec::new();
-    let mut speech_samples: usize = 0;
 
     loop {
         audio::drain_samples(&mut capture, &mut buffer);
@@ -720,14 +572,7 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
 
         let rms = audio::rms_energy(&buffer);
         let above_threshold = rms >= config.vad_threshold;
-
-        if above_threshold {
-            speech_samples += buffer.len();
-        } else {
-            speech_samples = 0;
-        }
-
-        let detected = speech_samples >= confirm_samples;
+        let detected = speech_detector.process(&buffer);
         let status = if detected {
             "DETECTED"
         } else if above_threshold {
@@ -740,7 +585,7 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
             "\r{:>10.6} {:>10.4} {:>12} {:>8}",
             rms,
             config.vad_threshold,
-            format!("{}/{}", speech_samples, confirm_samples),
+            format!("{}/{}", speech_detector.speech_samples(), confirm_samples),
             status
         );
         std::io::stdout().flush().ok();
@@ -754,6 +599,7 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::sync::{Mutex, OnceLock};
+    use std::thread;
     use std::time::Duration;
 
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -808,20 +654,27 @@ mod tests {
         let socket_path = daemon::daemon_socket_path()?;
         let (_socket_guard, control_events, _sender) = daemon::start_socket_listener(&socket_path)?;
 
-        daemon::send_record_start_command()?;
-
+        let client = thread::spawn(daemon::send_record_start_command);
         match control_events.recv_timeout(Duration::from_secs(1)) {
-            Ok(daemon::ControlEvent::StartRecording) => Ok(()),
-            Ok(daemon::ControlEvent::StopRecording) => {
-                Err(AppError::runtime("unexpected record-stop event"))
+            Ok(daemon::ControlEvent::Request { event, respond_to })
+                if matches!(*event, daemon::ControlEvent::StartRecording) =>
+            {
+                let _ = respond_to.send(daemon::ControlResponse {
+                    api_version: "1".to_string(),
+                    ok: true,
+                    state: Some("recording".to_string()),
+                    language: Some("en".to_string()),
+                    message: None,
+                });
             }
-            Ok(daemon::ControlEvent::Stop) => Err(AppError::runtime("unexpected stop event")),
-            Ok(daemon::ControlEvent::SetModel { .. }) => {
-                Err(AppError::runtime("unexpected set-model event"))
-            }
-            Ok(daemon::ControlEvent::Error(message)) => Err(AppError::runtime(message)),
-            Err(_) => Err(AppError::runtime("record-start command not received")),
+            Ok(event) => return Err(AppError::runtime(format!("unexpected event: {event:?}"))),
+            Err(_) => return Err(AppError::runtime("record-start command not received")),
         }
+        let response = client
+            .join()
+            .map_err(|_| AppError::runtime("record-start client panicked"))??;
+        assert_eq!(response.state.as_deref(), Some("recording"));
+        Ok(())
     }
 
     #[test]
@@ -868,6 +721,12 @@ mod tests {
     fn parses_daemon_stop_subcommand() {
         let cli = Cli::try_parse_from(["sv", "daemon", "stop"]).expect("failed to parse cli");
         assert_eq!(resolve_cli_mode(&cli), CliMode::StopDaemon);
+    }
+
+    #[test]
+    fn parses_daemon_status_subcommand() {
+        let cli = Cli::try_parse_from(["sv", "daemon", "status"]).expect("failed to parse cli");
+        assert_eq!(resolve_cli_mode(&cli), CliMode::StatusDaemon);
     }
 
     #[test]
@@ -940,13 +799,13 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
         let config = Config::from_sources(cli, &matches, FileConfig::default());
 
-        assert_eq!(config.mode, OutputMode::Paste);
-        assert!(config.output.restore_clipboard);
-        assert_eq!(config.output.paste_keys, "ctrl+v");
-        assert_eq!(config.output.pre_paste_delay_ms, 100);
-        assert_eq!(config.output.restore_clipboard_delay_ms, 250);
-        assert!(config.hotkey.enabled);
-        assert_eq!(config.hotkey.key, None);
+        assert_eq!(config.daemon.output.mode, OutputMode::Paste);
+        assert!(config.daemon.output.restore_clipboard);
+        assert_eq!(config.daemon.output.paste_keys, "ctrl+v");
+        assert_eq!(config.daemon.output.pre_paste_delay_ms, 100);
+        assert_eq!(config.daemon.output.restore_clipboard_delay_ms, 250);
+        assert!(config.daemon.hotkey.enabled);
+        assert_eq!(config.daemon.hotkey.key, None);
     }
 
     #[test]
@@ -966,8 +825,8 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
         let config = Config::from_sources(cli, &matches, file);
 
-        assert!(config.hotkey.enabled);
-        assert_eq!(config.hotkey.key.as_deref(), Some("RIGHTCTRL"));
+        assert!(config.daemon.hotkey.enabled);
+        assert_eq!(config.daemon.hotkey.key.as_deref(), Some("RIGHTCTRL"));
     }
 
     #[test]
@@ -990,11 +849,11 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
         let config = Config::from_sources(cli, &matches, file);
 
-        assert_eq!(config.mode, OutputMode::Clipboard);
-        assert_eq!(config.output.paste_keys, "ctrl+shift+v");
-        assert!(!config.output.restore_clipboard);
-        assert_eq!(config.output.pre_paste_delay_ms, 150);
-        assert_eq!(config.output.restore_clipboard_delay_ms, 400);
+        assert_eq!(config.daemon.output.mode, OutputMode::Clipboard);
+        assert_eq!(config.daemon.output.paste_keys, "ctrl+shift+v");
+        assert!(!config.daemon.output.restore_clipboard);
+        assert_eq!(config.daemon.output.pre_paste_delay_ms, 150);
+        assert_eq!(config.daemon.output.restore_clipboard_delay_ms, 400);
     }
 
     #[test]
@@ -1005,6 +864,7 @@ mod tests {
             segment_grace_ms = 1500
             segment_overlap_ms = 300
             segment_min_ms = 900
+            vad = "continuous"
             "#,
         )
         .expect("config should parse");
@@ -1023,9 +883,10 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
         let config = Config::from_sources(cli, &matches, file);
 
-        assert_eq!(config.segment_target_ms, 7000);
-        assert_eq!(config.segment_grace_ms, 1500);
-        assert_eq!(config.segment_overlap_ms, 250);
-        assert_eq!(config.segment_min_ms, 900);
+        assert_eq!(config.daemon.segment_target_ms, 7000);
+        assert_eq!(config.daemon.segment_grace_ms, 1500);
+        assert_eq!(config.daemon.segment_overlap_ms, 250);
+        assert_eq!(config.daemon.segment_min_ms, 900);
+        assert_eq!(config.daemon.vad, VadMode::Continuous);
     }
 }

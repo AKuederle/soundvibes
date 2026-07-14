@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum AppErrorKind {
+enum AppErrorKind {
     Config,
     Audio,
     Runtime,

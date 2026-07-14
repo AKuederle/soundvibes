@@ -1,5 +1,10 @@
 // Automated acceptance tests for docs/acceptance-tests.md.
 // Keep AT-xx mappings in sync with the documentation.
+use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
+use evdev::{AttributeSet, EventType, InputEvent, Key};
+#[cfg(feature = "test-support")]
+use serde_json::Value;
+
 use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -16,27 +21,26 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "test-support")]
-use std::os::unix::process::ExitStatusExt;
-#[cfg(feature = "test-support")]
-use std::process::{ExitStatus, Output};
-#[cfg(feature = "test-support")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "test-support")]
-use serde_json::Value;
-
-#[cfg(feature = "test-support")]
 use sv::daemon::test_support::{
-    control_channel, TestAudioBackend, TestOutput, TestTranscriberFactory,
+    daemon_config, TestAudioBackend, TestOutput, TestTranscriberFactory,
 };
+use sv::daemon::ControlEvent;
 #[cfg(feature = "test-support")]
 use sv::daemon::{DaemonConfig, DaemonDeps, DaemonOutput};
 #[cfg(feature = "test-support")]
-use sv::hotkey::HotkeyConfig;
+use sv::error::AppError;
+use sv::hotkey::{self, HotkeyConfig};
 #[cfg(feature = "test-support")]
-use sv::output::{OutputConfig, OutputMode};
+use sv::model::{ModelLanguage, ModelSize};
 #[cfg(feature = "test-support")]
-use sv::types::{AudioHost, OutputFormat, VadMode};
+use sv::output::test_support::{RecordedCommand, TestRunner};
+#[cfg(feature = "test-support")]
+use sv::output::OutputConfig;
+#[cfg(feature = "test-support")]
+use sv::types::{OutputFormat, VadMode};
 
 #[test]
 fn at01_daemon_starts_with_valid_model() -> Result<(), Box<dyn Error>> {
@@ -126,9 +130,9 @@ fn at01b_language_selects_model_variant() -> Result<(), Box<dyn Error>> {
         sv::model::ModelLanguage::Auto,
     );
 
-    assert!(english_spec.filename().contains(".en."));
-    assert!(!auto_spec.filename().contains(".en."));
-    assert_eq!(turbo_spec.filename(), "ggml-large-v3-turbo.bin");
+    assert!(english_spec.filename_result()?.contains(".en."));
+    assert!(!auto_spec.filename_result()?.contains(".en."));
+    assert_eq!(turbo_spec.filename_result()?, "ggml-large-v3-turbo.bin");
     Ok(())
 }
 
@@ -205,10 +209,44 @@ fn at03_invalid_input_device_returns_exit_code_3() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+#[test]
+fn at04a_hotkey_keyboard_reconnects_without_listener_restart() -> Result<(), Box<dyn Error>> {
+    if env::var("SV_HARDWARE_TESTS").ok().as_deref() != Some("1") {
+        eprintln!("Skipping AT-04a; set SV_HARDWARE_TESTS=1 to run.");
+        return Ok(());
+    }
+
+    let Ok(mut keyboard) = virtual_keyboard() else {
+        eprintln!("Skipping AT-04a; /dev/uinput is not writable.");
+        return Ok(());
+    };
+    keyboard
+        .enumerate_dev_nodes_blocking()?
+        .next()
+        .transpose()?;
+
+    let (sender, receiver) = mpsc::channel();
+    let config = HotkeyConfig {
+        enabled: true,
+        key: Some("RIGHTCTRL".to_string()),
+    };
+    let _listener = hotkey::start_listener(&config, sender)?;
+    assert_virtual_hotkey(&mut keyboard, &receiver)?;
+
+    drop(keyboard);
+    let mut replacement = virtual_keyboard()?;
+    replacement
+        .enumerate_dev_nodes_blocking()?
+        .next()
+        .transpose()?;
+    assert_virtual_hotkey(&mut replacement, &receiver)?;
+    Ok(())
+}
+
 #[cfg(feature = "test-support")]
 #[test]
 fn at04_daemon_hold_key_captures_and_transcribes() -> Result<(), Box<dyn Error>> {
-    let (sender, receiver) = control_channel();
+    let (sender, receiver) = mpsc::channel();
     let control_sender = sender.clone();
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut output = TestOutput::default();
@@ -219,31 +257,7 @@ fn at04_daemon_hold_key_captures_and_transcribes() -> Result<(), Box<dyn Error>>
         )),
         transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["hello".to_string()])),
     };
-    let config = DaemonConfig {
-        model_path: None,
-        download_model: false,
-        language: "en".to_string(),
-        device: None,
-        audio_host: AudioHost::Default,
-        sample_rate: 16_000,
-        format: OutputFormat::Plain,
-        mode: OutputMode::Stdout,
-        output: OutputConfig::default(),
-        vad: VadMode::Off,
-        vad_silence_ms: 800,
-        vad_threshold: 0.015,
-        vad_chunk_ms: 250,
-        segment_target_ms: sv::segmentation::DEFAULT_SEGMENT_TARGET_MS,
-        segment_grace_ms: sv::segmentation::DEFAULT_SEGMENT_GRACE_MS,
-        segment_overlap_ms: sv::segmentation::DEFAULT_SEGMENT_OVERLAP_MS,
-        segment_min_ms: sv::segmentation::DEFAULT_SEGMENT_MIN_MS,
-        debug_audio: false,
-        debug_vad: false,
-        dump_audio: false,
-        audio_feedback: false,
-        no_speech_timeout_ms: 0,
-        hotkey: HotkeyConfig::default(),
-    };
+    let config = daemon_config();
 
     let shutdown_trigger = Arc::clone(&shutdown);
     let control_thread = thread::spawn(move || {
@@ -266,7 +280,7 @@ fn at04_daemon_hold_key_captures_and_transcribes() -> Result<(), Box<dyn Error>>
 #[cfg(feature = "test-support")]
 #[test]
 fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
-    let (sender, receiver) = control_channel();
+    let (sender, receiver) = mpsc::channel();
     let control_sender = sender.clone();
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut output = TestOutput::default();
@@ -275,32 +289,13 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
             vec!["Mic".to_string()],
             vec![vec![0.2; 160]],
         )),
-        transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["hello".to_string()])),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
+            "hello\n\"world\"\u{0008}".to_string(),
+        ])),
     };
     let config = DaemonConfig {
-        model_path: None,
-        download_model: false,
-        language: "en".to_string(),
-        device: None,
-        audio_host: AudioHost::Default,
-        sample_rate: 16_000,
         format: OutputFormat::Jsonl,
-        mode: OutputMode::Stdout,
-        output: OutputConfig::default(),
-        vad: VadMode::Off,
-        vad_silence_ms: 800,
-        vad_threshold: 0.015,
-        vad_chunk_ms: 250,
-        segment_target_ms: sv::segmentation::DEFAULT_SEGMENT_TARGET_MS,
-        segment_grace_ms: sv::segmentation::DEFAULT_SEGMENT_GRACE_MS,
-        segment_overlap_ms: sv::segmentation::DEFAULT_SEGMENT_OVERLAP_MS,
-        segment_min_ms: sv::segmentation::DEFAULT_SEGMENT_MIN_MS,
-        debug_audio: false,
-        debug_vad: false,
-        dump_audio: false,
-        audio_feedback: false,
-        no_speech_timeout_ms: 0,
-        hotkey: HotkeyConfig::default(),
+        ..daemon_config()
     };
 
     let shutdown_trigger = Arc::clone(&shutdown);
@@ -321,7 +316,7 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
         .ok_or("missing JSONL output")?;
     let parsed: Value = serde_json::from_str(json_line)?;
     assert_eq!(parsed["type"], "final");
-    assert_eq!(parsed["text"], "hello");
+    assert_eq!(parsed["text"], "hello\n\"world\"\u{0008}");
     assert!(parsed["timestamp"].as_str().is_some());
     assert!(parsed["utterance"].as_u64().is_some());
     assert!(parsed["duration_ms"].as_u64().is_some());
@@ -331,7 +326,7 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
 #[cfg(feature = "test-support")]
 #[test]
 fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(), Box<dyn Error>> {
-    let (sender, receiver) = control_channel();
+    let (sender, receiver) = mpsc::channel();
     let control_sender = sender.clone();
     let (transcript_sender, transcript_receiver) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -350,29 +345,11 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
         ])),
     };
     let config = DaemonConfig {
-        model_path: None,
-        download_model: false,
-        language: "en".to_string(),
-        device: None,
-        audio_host: AudioHost::Default,
-        sample_rate: 16_000,
-        format: OutputFormat::Plain,
-        mode: OutputMode::Stdout,
-        output: OutputConfig::default(),
         vad: VadMode::Continuous,
         vad_silence_ms: 20,
-        vad_threshold: 0.015,
         vad_chunk_ms: 10,
-        segment_target_ms: sv::segmentation::DEFAULT_SEGMENT_TARGET_MS,
-        segment_grace_ms: sv::segmentation::DEFAULT_SEGMENT_GRACE_MS,
-        segment_overlap_ms: sv::segmentation::DEFAULT_SEGMENT_OVERLAP_MS,
         segment_min_ms: 5,
-        debug_audio: false,
-        debug_vad: false,
-        dump_audio: false,
-        audio_feedback: false,
-        no_speech_timeout_ms: 0,
-        hotkey: HotkeyConfig::default(),
+        ..daemon_config()
     };
 
     let shutdown_trigger = Arc::clone(&shutdown);
@@ -408,7 +385,7 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
 #[cfg(feature = "test-support")]
 #[test]
 fn at05b_continuous_long_speech_transcribes_before_release() -> Result<(), Box<dyn Error>> {
-    let (sender, receiver) = control_channel();
+    let (sender, receiver) = mpsc::channel();
     let control_sender = sender.clone();
     let (transcript_sender, transcript_receiver) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -427,29 +404,15 @@ fn at05b_continuous_long_speech_transcribes_before_release() -> Result<(), Box<d
         ])),
     };
     let config = DaemonConfig {
-        model_path: None,
-        download_model: false,
-        language: "en".to_string(),
-        device: None,
-        audio_host: AudioHost::Default,
         sample_rate: 1_000,
-        format: OutputFormat::Plain,
-        mode: OutputMode::Stdout,
-        output: OutputConfig::default(),
         vad: VadMode::Continuous,
         vad_silence_ms: 100,
-        vad_threshold: 0.015,
         vad_chunk_ms: 20,
         segment_target_ms: 20,
         segment_grace_ms: 20,
         segment_overlap_ms: 5,
         segment_min_ms: 10,
-        debug_audio: false,
-        debug_vad: false,
-        dump_audio: false,
-        audio_feedback: false,
-        no_speech_timeout_ms: 0,
-        hotkey: HotkeyConfig::default(),
+        ..daemon_config()
     };
 
     let shutdown_trigger = Arc::clone(&shutdown);
@@ -628,69 +591,17 @@ fn at07_cpu_fallback() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[test]
-fn at10_marketing_site_builds_and_smoke_test() -> Result<(), Box<dyn Error>> {
-    if env::var("SV_WEB_TESTS").ok().as_deref() != Some("1") {
-        eprintln!("Skipping AT-10; set SV_WEB_TESTS=1 to run.");
-        return Ok(());
-    }
-
-    if !command_available("npm") {
-        eprintln!("Skipping AT-10; npm not available in PATH.");
-        return Ok(());
-    }
-
-    let web_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web");
-    if !web_root.exists() {
-        eprintln!("Skipping AT-10; web/ directory missing.");
-        return Ok(());
-    }
-
-    let install_status = Command::new("npm")
-        .arg("install")
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .current_dir(&web_root)
-        .status()?;
-    if !install_status.success() {
-        return Err("AT-10 failed: npm install did not exit cleanly".into());
-    }
-
-    let build_status = Command::new("npm")
-        .args(["run", "build"])
-        .current_dir(&web_root)
-        .status()?;
-    if !build_status.success() {
-        return Err("AT-10 failed: npm run build did not exit cleanly".into());
-    }
-
-    let smoke_status = Command::new("npm")
-        .args(["run", "test:ui"])
-        .current_dir(&web_root)
-        .status()?;
-    if !smoke_status.success() {
-        return Err("AT-10 failed: npm run test:ui did not exit cleanly".into());
-    }
-
-    Ok(())
-}
-
 #[cfg(feature = "test-support")]
 #[test]
 fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn Error>> {
     let _wayland_guard = EnvGuard::set("WAYLAND_DISPLAY", "wayland-0");
-    let mut runner = AcceptanceRunner::default();
-    runner.push_output(0, b"text/html\ntext/plain\n");
-    runner.push_output(0, b"<b>old</b>");
+    let mut runner = TestRunner::default();
+    runner.push_output(0, b"text/html\ntext/plain\n", b"");
+    runner.push_output(0, b"<b>old</b>", b"");
     runner.push_status(0);
     runner.push_status(0);
 
-    sv::output::output_text_with_runner(
-        "new text",
-        OutputMode::Paste,
-        &OutputConfig::default(),
-        &mut runner,
-    )?;
+    sv::output::output_text_with_runner("new text", &OutputConfig::default(), &mut runner)?;
 
     assert_eq!(runner.commands.len(), 5);
     assert_command(&runner.commands[0], "wl-paste", &["--list-types"], b"");
@@ -725,96 +636,87 @@ fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn
     Ok(())
 }
 
-fn command_available(command: &str) -> bool {
-    Command::new(command)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
 #[cfg(feature = "test-support")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AcceptanceCommand {
-    program: String,
-    args: Vec<String>,
-    stdin: Vec<u8>,
-}
+#[test]
+fn at12_daemon_status_is_acknowledged() -> Result<(), Box<dyn Error>> {
+    let runtime_dir = temp_dir("soundvibes-acceptance-runtime");
+    fs::create_dir_all(&runtime_dir)?;
+    let _runtime_guard = EnvGuard::set("XDG_RUNTIME_DIR", &runtime_dir);
+    let data_dir = temp_dir("soundvibes-acceptance-data");
+    fs::create_dir_all(&data_dir)?;
+    let _data_guard = EnvGuard::set("XDG_DATA_HOME", &data_dir);
+    let socket_path = sv::daemon::daemon_socket_path()?;
+    let (_socket_guard, receiver, _sender) = sv::daemon::start_socket_listener(&socket_path)?;
 
-#[cfg(feature = "test-support")]
-#[derive(Default)]
-struct AcceptanceRunner {
-    commands: Vec<AcceptanceCommand>,
-    outputs: Vec<Output>,
-    statuses: Vec<ExitStatus>,
-    sleeps: Vec<Duration>,
-}
+    let client = thread::spawn(|| -> Result<(), AppError> {
+        let status = sv::daemon::send_status_command()?;
+        assert!(status.ok);
+        assert_eq!(status.state.as_deref(), Some("idle"));
+        assert_eq!(status.language.as_deref(), Some("en"));
 
-#[cfg(feature = "test-support")]
-impl AcceptanceRunner {
-    fn push_output(&mut self, status: i32, stdout: &[u8]) {
-        self.outputs.push(Output {
-            status: ExitStatus::from_raw(status),
-            stdout: stdout.to_vec(),
-            stderr: Vec::new(),
-        });
-    }
-
-    fn push_status(&mut self, status: i32) {
-        self.statuses.push(ExitStatus::from_raw(status));
-    }
-}
-
-#[cfg(feature = "test-support")]
-impl sv::output::CommandRunner for AcceptanceRunner {
-    fn output(&mut self, program: &str, args: &[String]) -> Result<Output, std::io::Error> {
-        self.commands.push(AcceptanceCommand {
-            program: program.to_string(),
-            args: args.to_vec(),
-            stdin: Vec::new(),
-        });
-        Ok(self.outputs.remove(0))
-    }
-
-    fn status_with_stdin(
-        &mut self,
-        program: &str,
-        args: &[String],
-        stdin: &[u8],
-    ) -> Result<ExitStatus, std::io::Error> {
-        self.commands.push(AcceptanceCommand {
-            program: program.to_string(),
-            args: args.to_vec(),
-            stdin: stdin.to_vec(),
-        });
-        Ok(self.statuses.remove(0))
-    }
-
-    fn copy_temporary_text(&mut self, text: &str) -> Result<(), sv::output::OutputError> {
-        self.commands.push(AcceptanceCommand {
-            program: "temporary-clipboard-copy".to_string(),
-            args: vec![
-                "text/plain".to_string(),
-                "x-kde-passwordManagerHint".to_string(),
-            ],
-            stdin: text.as_bytes().to_vec(),
-        });
+        let reload = sv::daemon::send_set_model_command(ModelSize::Tiny, ModelLanguage::En);
+        let stopped = sv::daemon::send_stop_command()?;
+        assert!(stopped.ok);
+        let reload_error = reload.expect_err("missing model reload should fail");
+        assert!(reload_error.to_string().contains("model file not found"));
         Ok(())
-    }
+    });
 
-    fn sleep(&mut self, duration: Duration) {
-        self.sleeps.push(duration);
-    }
+    let config = daemon_config();
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::new(vec!["Mic".to_string()], Vec::new())),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(Vec::new())),
+    };
+    let mut output = TestOutput::default();
+    let shutdown = AtomicBool::new(false);
+    sv::daemon::run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown)?;
+    client.join().expect("control client failed")?;
+    Ok(())
 }
 
 #[cfg(feature = "test-support")]
-fn assert_command(command: &AcceptanceCommand, program: &str, args: &[&str], stdin: &[u8]) {
+fn assert_command(command: &RecordedCommand, program: &str, args: &[&str], stdin: &[u8]) {
     let expected_args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
     assert_eq!(command.program, program);
     assert_eq!(command.args, expected_args);
     assert_eq!(command.stdin, stdin);
+}
+
+fn virtual_keyboard() -> std::io::Result<VirtualDevice> {
+    let mut keys = AttributeSet::<Key>::new();
+    for key in [Key::KEY_A, Key::KEY_Z, Key::KEY_ENTER, Key::KEY_RIGHTCTRL] {
+        keys.insert(key);
+    }
+    VirtualDeviceBuilder::new()?
+        .name("SoundVibes reconnect acceptance keyboard")
+        .with_keys(&keys)?
+        .build()
+}
+
+fn assert_virtual_hotkey(
+    keyboard: &mut VirtualDevice,
+    receiver: &mpsc::Receiver<ControlEvent>,
+) -> Result<(), Box<dyn Error>> {
+    let press = InputEvent::new(EventType::KEY, Key::KEY_RIGHTCTRL.code(), 1);
+    let release = InputEvent::new(EventType::KEY, Key::KEY_RIGHTCTRL.code(), 0);
+    let deadline = Instant::now() + Duration::from_secs(3);
+
+    loop {
+        keyboard.emit(&[press])?;
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(ControlEvent::StartRecording) => break,
+            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {
+                keyboard.emit(&[release])?;
+            }
+            Ok(event) => return Err(format!("unexpected hotkey event: {event:?}").into()),
+            Err(err) => return Err(format!("hotkey press was not received: {err}").into()),
+        }
+    }
+
+    keyboard.emit(&[release])?;
+    let event = receiver.recv_timeout(Duration::from_secs(1))?;
+    assert!(matches!(event, ControlEvent::StopRecording));
+    Ok(())
 }
 
 fn model_path() -> Result<PathBuf, Box<dyn Error>> {

@@ -1,11 +1,11 @@
 pub mod audio;
 pub mod daemon;
 pub mod error;
-pub mod feedback;
+mod feedback;
 pub mod hotkey;
 pub mod model;
 pub mod output;
 pub mod segmentation;
-pub mod transcription_worker;
+mod transcription_worker;
 pub mod types;
 pub mod whisper;

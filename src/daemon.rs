@@ -133,6 +133,63 @@ pub enum ControlEvent {
     Error(String),
 }
 
+struct ActiveRecording {
+    capture: Box<dyn CaptureSource>,
+    buffer: Vec<f32>,
+    has_leading_overlap: bool,
+    trailing_silence_samples: usize,
+    started: std::time::Instant,
+    speech_detector: audio::SpeechDetector,
+}
+
+impl ActiveRecording {
+    fn start(
+        deps: &DaemonDeps,
+        host: &cpal::Host,
+        config: &DaemonConfig,
+        output: &mut dyn DaemonOutput,
+    ) -> Result<Self, AppError> {
+        let capture = deps
+            .audio
+            .start_capture(host, config.device.as_deref(), config.sample_rate)
+            .map_err(|err| AppError::audio(err.message))?;
+        output.stdout("Recording started.");
+        if config.audio_feedback {
+            feedback::play_start_sound();
+        }
+        Ok(Self {
+            capture,
+            buffer: Vec::new(),
+            has_leading_overlap: false,
+            trailing_silence_samples: 0,
+            started: std::time::Instant::now(),
+            speech_detector: audio::SpeechDetector::new(
+                config.vad_threshold,
+                100,
+                config.sample_rate,
+            ),
+        })
+    }
+
+    fn finish(
+        mut self,
+        worker: &mut TranscriptionWorker,
+        config: &DaemonConfig,
+        vad: &audio::VadConfig,
+        output: &mut dyn DaemonOutput,
+    ) -> Result<(), AppError> {
+        self.capture.drain(&mut self.buffer);
+        submit_final_recording(
+            worker,
+            config,
+            vad,
+            &self.buffer,
+            self.has_leading_overlap,
+            output,
+        )
+    }
+}
+
 pub fn run_daemon(
     config: &DaemonConfig,
     deps: &DaemonDeps,
@@ -194,17 +251,8 @@ pub fn run_daemon_loop(
         config.vad_chunk_ms,
     );
 
-    let mut recording = false;
-    let mut buffer = Vec::new();
+    let mut recording: Option<ActiveRecording> = None;
     let mut last_emitted_transcript = String::new();
-    let mut capture: Option<Box<dyn CaptureSource>> = None;
-    let mut buffer_has_leading_overlap = false;
-    // For continuous mode: track silence at end of buffer
-    let mut trailing_silence_samples: usize = 0;
-    // For no-speech timeout: track when recording started and sustained speech
-    let mut recording_started: Option<std::time::Instant> = None;
-    let mut speech_detector =
-        audio::SpeechDetector::new(config.vad_threshold, 100, config.sample_rate);
     // Grace period after recording starts to ignore audio feedback pickup (500ms)
     let speech_detection_grace_ms: u64 = if config.audio_feedback { 500 } else { 0 };
     let segment_config = segment_config(config);
@@ -213,16 +261,8 @@ pub fn run_daemon_loop(
         drain_worker_results(&mut worker, config, output, &mut last_emitted_transcript);
 
         if shutdown.load(Ordering::Relaxed) {
-            if recording {
-                stop_recording(
-                    &mut worker,
-                    config,
-                    &vad,
-                    &mut capture,
-                    &mut buffer,
-                    buffer_has_leading_overlap,
-                    output,
-                )?;
+            if let Some(active) = recording.take() {
+                active.finish(&mut worker, config, &vad, output)?;
             }
             wait_for_pending_results(&mut worker, config, output, &mut last_emitted_transcript);
             worker.shutdown()?;
@@ -231,35 +271,13 @@ pub fn run_daemon_loop(
         }
         match control_events.recv_timeout(Duration::from_millis(20)) {
             Ok(ControlEvent::StartRecording) => {
-                if !recording {
-                    start_active_recording(
-                        deps,
-                        &host,
-                        config,
-                        &mut recording,
-                        &mut capture,
-                        &mut buffer,
-                        &mut trailing_silence_samples,
-                        &mut recording_started,
-                        &mut speech_detector,
-                        output,
-                    )?;
-                    buffer_has_leading_overlap = false;
+                if recording.is_none() {
+                    recording = Some(ActiveRecording::start(deps, &host, config, output)?);
                 }
             }
             Ok(ControlEvent::StopRecording) => {
-                if recording {
-                    stop_active_recording(
-                        &mut worker,
-                        config,
-                        &vad,
-                        &mut recording,
-                        &mut capture,
-                        &mut buffer,
-                        buffer_has_leading_overlap,
-                        output,
-                    )?;
-                    buffer_has_leading_overlap = false;
+                if let Some(active) = recording.take() {
+                    active.finish(&mut worker, config, &vad, output)?;
                     wait_for_pending_results(
                         &mut worker,
                         config,
@@ -279,11 +297,7 @@ pub fn run_daemon_loop(
                 size,
                 model_language,
             }) => {
-                if recording {
-                    recording = false;
-                    buffer.clear();
-                    capture = None;
-                    buffer_has_leading_overlap = false;
+                if recording.take().is_some() {
                     output.stdout("Recording stopped for model reload.");
                 }
                 wait_for_pending_results(&mut worker, config, output, &mut last_emitted_transcript);
@@ -319,166 +333,80 @@ pub fn run_daemon_loop(
             }
         }
 
-        if recording {
-            if let Some(active) = capture.as_mut() {
-                let prev_len = buffer.len();
-                active.drain(&mut buffer);
-                let new_samples = buffer.len() - prev_len;
+        if let Some(active) = recording.as_mut() {
+            let prev_len = active.buffer.len();
+            active.capture.drain(&mut active.buffer);
+            let new_samples = active.buffer.len() - prev_len;
 
-                // Check for speech in new samples
-                if new_samples > 0 {
-                    let new_audio = &buffer[prev_len..];
-                    let rms = audio::rms_energy(new_audio);
+            // Check for speech in new samples
+            if new_samples > 0 {
+                let new_audio = &active.buffer[prev_len..];
+                let rms = audio::rms_energy(new_audio);
 
-                    // Track sustained speech for no-speech timeout (skip grace period for audio feedback)
-                    let in_grace_period = recording_started
-                        .map(|t| (t.elapsed().as_millis() as u64) < speech_detection_grace_ms)
-                        .unwrap_or(false);
+                // Track sustained speech for no-speech timeout (skip grace period for audio feedback)
+                let in_grace_period =
+                    (active.started.elapsed().as_millis() as u64) < speech_detection_grace_ms;
 
-                    if !in_grace_period {
-                        speech_detector.process(new_audio);
-                    }
-
-                    if config.vad == VadMode::Continuous {
-                        if rms < config.vad_threshold {
-                            trailing_silence_samples += new_samples;
-                        } else {
-                            trailing_silence_samples = 0;
-                        }
-
-                        if let SegmentDecision::Cut { speech_end, reason } =
-                            segmentation::decide_segment(
-                                &segment_config,
-                                buffer.len(),
-                                trailing_silence_samples,
-                                rms,
-                            )
-                        {
-                            submit_segment(
-                                &mut worker,
-                                config,
-                                &buffer[..speech_end],
-                                buffer_has_leading_overlap,
-                                output,
-                            )?;
-                            buffer = segmentation::carry_after_cut(
-                                &buffer,
-                                speech_end,
-                                &segment_config,
-                                reason,
-                            );
-                            buffer_has_leading_overlap = reason != CutReason::Silence
-                                && carried_overlap_contains_speech(
-                                    &buffer,
-                                    segment_config.sample_rate,
-                                    segment_config.vad_threshold,
-                                    config.vad_chunk_ms,
-                                );
-                            trailing_silence_samples = 0;
-                            speech_detector.reset();
-                            recording_started = Some(std::time::Instant::now());
-                        }
-                    }
+                if !in_grace_period {
+                    active.speech_detector.process(new_audio);
                 }
 
-                // Check for no-speech timeout
-                if config.no_speech_timeout_ms > 0
-                    && !speech_detector.is_detected()
-                    && recording_started
-                        .map(|t| (t.elapsed().as_millis() as u64) >= config.no_speech_timeout_ms)
-                        .unwrap_or(false)
-                {
-                    recording = false;
-                    buffer.clear();
-                    capture = None;
-                    buffer_has_leading_overlap = false;
-                    recording_started = None;
-                    output.stdout("No speech detected, cancelled.");
-                    if config.audio_feedback {
-                        feedback::play_stop_sound();
+                if config.vad == VadMode::Continuous {
+                    if rms < config.vad_threshold {
+                        active.trailing_silence_samples += new_samples;
+                    } else {
+                        active.trailing_silence_samples = 0;
                     }
+
+                    if let SegmentDecision::Cut { speech_end, reason } =
+                        segmentation::decide_segment(
+                            &segment_config,
+                            active.buffer.len(),
+                            active.trailing_silence_samples,
+                            rms,
+                        )
+                    {
+                        submit_segment(
+                            &mut worker,
+                            config,
+                            &active.buffer[..speech_end],
+                            active.has_leading_overlap,
+                            output,
+                        )?;
+                        active.buffer = segmentation::carry_after_cut(
+                            &active.buffer,
+                            speech_end,
+                            &segment_config,
+                            reason,
+                        );
+                        active.has_leading_overlap = reason != CutReason::Silence
+                            && carried_overlap_contains_speech(
+                                &active.buffer,
+                                segment_config.sample_rate,
+                                segment_config.vad_threshold,
+                                config.vad_chunk_ms,
+                            );
+                        active.trailing_silence_samples = 0;
+                        active.speech_detector.reset();
+                        active.started = std::time::Instant::now();
+                    }
+                }
+            }
+
+            // Check for no-speech timeout
+            if config.no_speech_timeout_ms > 0
+                && !active.speech_detector.is_detected()
+                && (active.started.elapsed().as_millis() as u64) >= config.no_speech_timeout_ms
+            {
+                recording = None;
+                output.stdout("No speech detected, cancelled.");
+                if config.audio_feedback {
+                    feedback::play_stop_sound();
                 }
             }
         }
     }
     Ok(())
-}
-
-fn stop_recording(
-    worker: &mut TranscriptionWorker,
-    config: &DaemonConfig,
-    vad: &audio::VadConfig,
-    capture: &mut Option<Box<dyn CaptureSource>>,
-    buffer: &mut Vec<f32>,
-    buffer_has_leading_overlap: bool,
-    output: &mut dyn DaemonOutput,
-) -> Result<(), AppError> {
-    let mut active = capture
-        .take()
-        .ok_or_else(|| AppError::runtime("capture stream missing"))?;
-    active.drain(buffer);
-    submit_final_recording(
-        worker,
-        config,
-        vad,
-        buffer,
-        buffer_has_leading_overlap,
-        output,
-    )?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn start_active_recording(
-    deps: &DaemonDeps,
-    host: &cpal::Host,
-    config: &DaemonConfig,
-    recording: &mut bool,
-    capture: &mut Option<Box<dyn CaptureSource>>,
-    buffer: &mut Vec<f32>,
-    trailing_silence_samples: &mut usize,
-    recording_started: &mut Option<std::time::Instant>,
-    speech_detector: &mut audio::SpeechDetector,
-    output: &mut dyn DaemonOutput,
-) -> Result<(), AppError> {
-    let new_capture = deps
-        .audio
-        .start_capture(host, config.device.as_deref(), config.sample_rate)
-        .map_err(|err| AppError::audio(err.message))?;
-    *recording = true;
-    buffer.clear();
-    *trailing_silence_samples = 0;
-    *recording_started = Some(std::time::Instant::now());
-    speech_detector.reset();
-    *capture = Some(new_capture);
-    output.stdout("Recording started.");
-    if config.audio_feedback {
-        feedback::play_start_sound();
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn stop_active_recording(
-    worker: &mut TranscriptionWorker,
-    config: &DaemonConfig,
-    vad: &audio::VadConfig,
-    recording: &mut bool,
-    capture: &mut Option<Box<dyn CaptureSource>>,
-    buffer: &mut Vec<f32>,
-    buffer_has_leading_overlap: bool,
-    output: &mut dyn DaemonOutput,
-) -> Result<(), AppError> {
-    *recording = false;
-    stop_recording(
-        worker,
-        config,
-        vad,
-        capture,
-        buffer,
-        buffer_has_leading_overlap,
-        output,
-    )
 }
 
 fn submit_final_recording(

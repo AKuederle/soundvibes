@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
@@ -171,7 +170,7 @@ pub fn parse_key_name(name: &str) -> Result<Key, AppError> {
         )));
     }
 
-    if let Some(alias) = common_key_aliases().get(key_name.as_str()).copied() {
+    if let Some(alias) = common_key_alias(key_name.as_str()) {
         return Ok(alias);
     }
     Key::from_str(&normalized)
@@ -183,18 +182,15 @@ pub fn parse_key_name(name: &str) -> Result<Key, AppError> {
         })
 }
 
-fn common_key_aliases() -> HashMap<&'static str, Key> {
-    [
-        ("LEFT_CTRL", Key::KEY_LEFTCTRL),
-        ("LCTRL", Key::KEY_LEFTCTRL),
-        ("RIGHT_CTRL", Key::KEY_RIGHTCTRL),
-        ("RCTRL", Key::KEY_RIGHTCTRL),
-        ("LALT", Key::KEY_LEFTALT),
-        ("RALT", Key::KEY_RIGHTALT),
-        ("ESC", Key::KEY_ESC),
-    ]
-    .into_iter()
-    .collect()
+fn common_key_alias(name: &str) -> Option<Key> {
+    match name {
+        "LEFT_CTRL" | "LCTRL" => Some(Key::KEY_LEFTCTRL),
+        "RIGHT_CTRL" | "RCTRL" => Some(Key::KEY_RIGHTCTRL),
+        "LALT" => Some(Key::KEY_LEFTALT),
+        "RALT" => Some(Key::KEY_RIGHTALT),
+        "ESC" => Some(Key::KEY_ESC),
+        _ => None,
+    }
 }
 
 const XKB_OFFSET: u16 = 8;

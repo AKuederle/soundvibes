@@ -55,9 +55,7 @@ impl fmt::Display for ModelLanguage {
 }
 
 pub fn model_language_for_transcription(language: &str) -> ModelLanguage {
-    if language.eq_ignore_ascii_case("auto") {
-        ModelLanguage::Auto
-    } else if language.eq_ignore_ascii_case("en") {
+    if language.eq_ignore_ascii_case("en") {
         ModelLanguage::En
     } else {
         ModelLanguage::Auto

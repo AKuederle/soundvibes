@@ -296,7 +296,14 @@ fn copy_plain_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), Out
 }
 
 fn type_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputError> {
-    let script = dotool_type_script(text);
+    run_dotool(&dotool_type_script(text), "typing", runner)
+}
+
+fn run_dotool(
+    script: &str,
+    action: &str,
+    runner: &mut dyn CommandRunner,
+) -> Result<(), OutputError> {
     let status = runner
         .status_with_stdin("dotool", &[], script.as_bytes())
         .map_err(|err| {
@@ -310,7 +317,7 @@ fn type_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputErr
         Ok(())
     } else {
         Err(OutputError::new(format!(
-            "dotool typing exited with status {status}"
+            "dotool {action} exited with status {status}"
         )))
     }
 }
@@ -342,23 +349,7 @@ fn send_paste_key_dotool(
     key: &ParsedPasteKey,
     runner: &mut dyn CommandRunner,
 ) -> Result<(), OutputError> {
-    let script = key.to_dotool_script();
-    let status = runner
-        .status_with_stdin("dotool", &[], script.as_bytes())
-        .map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                OutputError::new("dotool not found; install dotool")
-            } else {
-                OutputError::new(format!("failed to run dotool: {err}"))
-            }
-        })?;
-    if status.success() {
-        return Ok(());
-    }
-
-    Err(OutputError::new(format!(
-        "dotool paste key exited with status {status}"
-    )))
+    run_dotool(&key.to_dotool_script(), "paste key", runner)
 }
 
 impl ParsedPasteKey {

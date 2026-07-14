@@ -103,11 +103,8 @@ impl Default for DaemonDeps {
 pub fn select_audio_host(audio_host: AudioHost) -> Result<cpal::Host, AppError> {
     match audio_host {
         AudioHost::Default => Ok(cpal::default_host()),
-        _ => {
-            let host_id = match audio_host {
-                AudioHost::Alsa => cpal::HostId::Alsa,
-                AudioHost::Default => cpal::HostId::Alsa,
-            };
+        AudioHost::Alsa => {
+            let host_id = cpal::HostId::Alsa;
             if !cpal::available_hosts().contains(&host_id) {
                 let available = cpal::available_hosts()
                     .into_iter()
@@ -447,12 +444,7 @@ fn start_active_recording(
     let new_capture = deps
         .audio
         .start_capture(host, config.device.as_deref(), config.sample_rate)
-        .map_err(|err| match err.kind {
-            audio::AudioErrorKind::DeviceNotFound if config.device.is_some() => {
-                AppError::audio(err.message)
-            }
-            _ => AppError::audio(err.message),
-        })?;
+        .map_err(|err| AppError::audio(err.message))?;
     *recording = true;
     buffer.clear();
     *trailing_silence_samples = 0;

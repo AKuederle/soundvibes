@@ -42,30 +42,26 @@ impl Default for OutputConfig {
 }
 
 #[derive(Debug)]
-pub struct OutputError {
-    message: String,
-}
+pub struct OutputError(String);
 
 impl OutputError {
     fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
+        Self(message.into())
     }
 }
 
 impl fmt::Display for OutputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
+        f.write_str(&self.0)
     }
 }
 
 impl std::error::Error for OutputError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClipboardSnapshot {
-    pub mime_type: String,
-    pub data: Vec<u8>,
+struct ClipboardSnapshot {
+    mime_type: String,
+    data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

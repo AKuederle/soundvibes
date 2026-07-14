@@ -15,7 +15,7 @@ use regex::Regex;
     non_snake_case,
     non_upper_case_globals
 )]
-pub mod bindings {
+mod bindings {
     include!(concat!(env!("OUT_DIR"), "/whisper_bindings.rs"));
 }
 

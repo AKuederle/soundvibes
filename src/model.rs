@@ -64,8 +64,8 @@ pub fn model_language_for_transcription(language: &str) -> ModelLanguage {
 
 #[derive(Debug, Copy, Clone)]
 pub struct ModelSpec {
-    pub size: ModelSize,
-    pub language: ModelLanguage,
+    size: ModelSize,
+    language: ModelLanguage,
 }
 
 impl ModelSpec {
@@ -103,7 +103,7 @@ pub fn prepare_model(
     Ok(PreparedModel { path, downloaded })
 }
 
-pub fn resolve_model_path_result(
+fn resolve_model_path_result(
     explicit_path: Option<&Path>,
     spec: &ModelSpec,
 ) -> Result<PathBuf, AppError> {

@@ -12,6 +12,7 @@ vulkan = []
 clap = { version = "4.5.27", features = ["derive"] }
 cpal = "0.15.3"
 evdev = "0.12"
+udev = { version = "0.9", features = ["send"] }
 ringbuf = "0.3.3"
 alsa-sys = "0.3.1"
 libc = "0.2"

@@ -405,7 +405,6 @@ vad_chunk_ms = 100          # Chunk size in milliseconds
 
 # Debug settings (set to true for troubleshooting)
 debug_audio = false
-debug_vad = false
 dump_audio = false          # Save audio to WAV files for debugging
 
 [output]

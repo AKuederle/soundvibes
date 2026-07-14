@@ -22,8 +22,6 @@ pub struct VadConfig {
     pub energy_threshold: f32,
     pub silence_timeout: Duration,
     pub chunk_size: Duration,
-    #[allow(dead_code)]
-    pub debug: bool,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -71,14 +69,12 @@ impl VadConfig {
         silence_timeout_ms: u64,
         energy_threshold: f32,
         chunk_ms: u64,
-        debug: bool,
     ) -> Self {
         Self {
             enabled,
             energy_threshold,
             silence_timeout: Duration::from_millis(silence_timeout_ms),
             chunk_size: Duration::from_millis(chunk_ms),
-            debug,
         }
     }
 }

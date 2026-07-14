@@ -102,9 +102,6 @@ struct Cli {
     debug_audio: bool,
 
     #[arg(long, default_value_t = false, global = true)]
-    debug_vad: bool,
-
-    #[arg(long, default_value_t = false, global = true)]
     list_devices: bool,
 
     #[arg(long, default_value_t = false, global = true)]
@@ -220,7 +217,6 @@ struct Config {
     segment_overlap_ms: u64,
     segment_min_ms: u64,
     debug_audio: bool,
-    debug_vad: bool,
     list_devices: bool,
     dump_audio: bool,
     audio_feedback: bool,
@@ -323,7 +319,6 @@ impl Config {
         let segment_min_ms =
             sources.value("segment_min_ms", cli.segment_min_ms, file.segment_min_ms);
         let debug_audio = sources.value("debug_audio", cli.debug_audio, file.debug_audio);
-        let debug_vad = sources.value("debug_vad", cli.debug_vad, file.debug_vad);
         let list_devices = sources.value("list_devices", cli.list_devices, file.list_devices);
         let dump_audio = sources.value("dump_audio", cli.dump_audio, file.dump_audio);
         let audio_feedback =
@@ -369,7 +364,6 @@ impl Config {
             segment_overlap_ms,
             segment_min_ms,
             debug_audio,
-            debug_vad,
             list_devices,
             dump_audio,
             audio_feedback,
@@ -402,7 +396,6 @@ struct FileConfig {
     segment_overlap_ms: Option<u64>,
     segment_min_ms: Option<u64>,
     debug_audio: Option<bool>,
-    debug_vad: Option<bool>,
     list_devices: Option<bool>,
     dump_audio: Option<bool>,
     audio_feedback: Option<bool>,
@@ -514,7 +507,6 @@ fn main() {
             segment_overlap_ms: config.segment_overlap_ms,
             segment_min_ms: config.segment_min_ms,
             debug_audio: config.debug_audio,
-            debug_vad: config.debug_vad,
             dump_audio: config.dump_audio,
             audio_feedback: config.audio_feedback,
             no_speech_timeout_ms: config.no_speech_timeout_ms,

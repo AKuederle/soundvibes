@@ -45,7 +45,6 @@ pub struct DaemonConfig {
     pub segment_overlap_ms: u64,
     pub segment_min_ms: u64,
     pub debug_audio: bool,
-    pub debug_vad: bool,
     pub dump_audio: bool,
     pub audio_feedback: bool,
     pub no_speech_timeout_ms: u64,
@@ -196,7 +195,6 @@ pub fn run_daemon_loop(
         config.vad_silence_ms,
         config.vad_threshold,
         config.vad_chunk_ms,
-        config.debug_vad,
     );
 
     let mut recording = false;
@@ -1152,7 +1150,6 @@ mod tests {
             segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
             segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
             debug_audio: false,
-            debug_vad: false,
             dump_audio: false,
             audio_feedback: false,
             no_speech_timeout_ms: 0,

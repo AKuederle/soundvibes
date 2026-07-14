@@ -4,10 +4,10 @@ These tests validate the product behavior for the offline Linux CLI.
 
 ## Environment
 - Linux x86_64 machine with a working microphone.
-- `$XDG_DATA_HOME` set as desired, defaulting to `~/.local/share` when unset.
-- `$XDG_CONFIG_HOME` set as desired, defaulting to `~/.config` when unset.
-- Model file available at `$XDG_DATA_HOME/soundvibes/models/ggml-base.en.bin`.
-- Config file at `$XDG_CONFIG_HOME/soundvibes/config.toml`.
+- `<data-home>` means `$XDG_DATA_HOME` when set, or `~/.local/share` when it is unset.
+- `<config-home>` means `$XDG_CONFIG_HOME` when set, or `~/.config` when it is unset.
+- Model file available at `<data-home>/soundvibes/models/ggml-base.en.bin`.
+- Config file at `<config-home>/soundvibes/config.toml`.
 - No network required.
 - If available, a machine with a supported NVIDIA/AMD GPU for GPU-acceleration checks.
 
@@ -22,13 +22,13 @@ These tests validate the product behavior for the offline Linux CLI.
 ## Tests
 
 ### AT-01: CLI starts with valid model
-- Setup: set `model` in config to `$XDG_DATA_HOME/soundvibes/models/ggml-base.en.bin`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/ggml-base.en.bin`.
 - Command: `sv daemon start`
 - Expect: process starts, listens on socket, no error output.
 - Pass: exit code is `0` after user stops the process.
 
 ### AT-01a: Missing model is auto-downloaded
-- Setup: remove `$XDG_DATA_HOME/soundvibes/models/ggml-small.bin`, set `model_size` to `small` and `model_language` to `auto`.
+- Setup: remove `<data-home>/soundvibes/models/ggml-small.bin`, set `model_size` to `small` and `model_language` to `auto`.
 - Command: `sv daemon start`
 - Expect: model download occurs before startup completes.
 - Pass: model file exists at the default location and daemon starts.
@@ -40,7 +40,7 @@ These tests validate the product behavior for the offline Linux CLI.
 - Pass: model file path resolves to `ggml-<size>.en.bin` when language is `en` and `model_language` is unset; `large-v3-turbo` resolves to `ggml-large-v3-turbo.bin`.
 
 ### AT-02: Missing model returns error
-- Setup: set `model` in config to `$XDG_DATA_HOME/soundvibes/models/missing.bin` and set `download_model = false`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/missing.bin` and set `download_model = false`.
 - Command: `sv daemon start`
 - Expect: error message indicating missing model.
 - Pass: exit code is `2`.
@@ -52,7 +52,7 @@ These tests validate the product behavior for the offline Linux CLI.
 - Pass: exit code is `3`.
 
 ### AT-04: Daemon hold-to-record capture
-- Setup: set `model` in config to `$XDG_DATA_HOME/soundvibes/models/ggml-base.en.bin`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/ggml-base.en.bin`.
 - Command: `sv daemon start` with `[hotkey] enabled = true` and a configured key such as `RIGHTCTRL`.
 - Action: hold the configured key, speak a short sentence, then release the key.
 - Expect: final transcript is printed after key release.
@@ -80,7 +80,7 @@ These tests validate the product behavior for the offline Linux CLI.
 - Pass: output appears before key release, and the remaining tail is transcribed after release.
 
 ### AT-06: Offline operation
-- Setup: set `model` in config to `$XDG_DATA_HOME/soundvibes/models/ggml-base.en.bin`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/ggml-base.en.bin`.
 - Command: disconnect network, run `sv daemon start`, then hold/release the configured key.
 - Expect: no network access required.
 - Pass: transcription works without network connectivity.

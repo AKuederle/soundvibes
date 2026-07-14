@@ -2,8 +2,6 @@
 
 This repository is a Rust CLI app for offline speech-to-text on Linux. Use these notes to work efficiently and consistently.
 
-**New to this project?** Visit [soundvibes.teashaped.dev](https://soundvibes.teashaped.dev) for an overview of what SoundVibes does, how users interact with it, and the key features.
-
 ## Source-of-Truth Rules
 
 - Follow these instructions plus any user-provided requirements.
@@ -39,12 +37,6 @@ Tests (specific variants):
 
 Validation plan requirement:
 - Always note which checks you ran or plan to run (tests, manual acceptance checks, etc.).
-
-## Marketing Site (web)
-
-- Prefer `mise run web-dev` (Astro dev server) for HMR while developing; avoid restarting between edits.
-- Use `mise run web-preview` only to validate the built output.
-- Use `agent-browser` during development; reserve `snapshot` for visual inspection and use cheaper validators (build/tests/logs) for most checks.
 
 ## Coding Style Guidelines (Rust)
 

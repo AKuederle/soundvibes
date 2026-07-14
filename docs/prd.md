@@ -12,7 +12,7 @@ This PRD is a living document and should be updated as product requirements and 
 - Use `sv daemon start` to run the service; holding the configured key records, releasing it stops and transcribes.
 - Ship as a single Rust CLI binary plus an automatically downloaded model file.
 - Automatically accelerate inference on NVIDIA/AMD GPUs when available, otherwise fall back to CPU.
-- Enforce PR quality gates that match a single local command for tests and linting.
+- Keep local and pull-request quality gates aligned behind one command.
 
 ## Target Users
 - Linux developers and power users who want local voice-to-text.
@@ -69,14 +69,12 @@ This PRD is a living document and should be updated as product requirements and 
 ## Performance Assumptions
 - Best-effort latency on CPU for a small model.
 - Acceptable transcription time after capture stops.
-- No hard latency SLA in the initial release.
+- No hard latency SLA.
 - GPU acceleration is opportunistic and should not require user configuration.
 
-## Packaging & Distribution
-- Single compiled Rust binary.
-- Download model file to a default data directory on first use.
-- Provide a simple tarball release for Linux.
-- Publish Linux release artifacts via GitHub Releases with checksums for automated download tooling.
+## Local Installation
+- Build or install the Rust binary locally with Cargo.
+- Download the configured model to the default data directory on first use.
 
 ## Configuration
 - Load config from XDG base directory if available.

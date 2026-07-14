@@ -89,23 +89,11 @@ These tests validate the product behavior for the offline Linux CLI.
 - Expect: GPU machine logs show a GPU backend selected; CPU-only machine logs show fallback to CPU.
 - Pass: transcription succeeds on both, and no manual GPU selection is required.
 
-### AT-08: Release artifacts published
-- Setup: create a GitHub Release with a tag.
-- Command: `gh release view <tag> --json assets`.
-- Expect: assets include the Linux x86_64 tarball and corresponding SHA256 checksum file.
-- Pass: assets are downloadable and checksum matches the tarball contents.
-
 ### AT-09: PR quality gates mirror local checks
 - Setup: open a pull request targeting `main`.
 - Command: `mise run ci` locally and the CI workflow for the PR.
 - Expect: the same set of checks run in both environments.
 - Pass: both local and CI runs complete successfully with matching steps.
-
-### AT-10: Marketing site build and smoke test
-- Setup: ensure Node.js and npm are installed, export `SV_WEB_TESTS=1`.
-- Command: `cargo test --test acceptance -- at10_marketing_site_builds_and_smoke_test`.
-- Expect: `web/` dependencies install, Astro builds, and the UI smoke test passes.
-- Pass: the acceptance test exits 0.
 
 ### AT-11: Paste mode restores clipboard
 - Setup: Wayland session with `wl-copy`, `wl-paste`, `dotool`, and `/dev/uinput` access available.

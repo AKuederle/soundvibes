@@ -1,32 +1,22 @@
-<div align="center">
-  <img src="docs/assets/soundvibes.png" alt="SoundVibes Logo" width="200">
-  <h1>SoundVibes (sv)</h1>
-  <p>Open source voice-to-text for Linux</p>
-</div>
+# SoundVibes
 
-## Overview
+SoundVibes (`sv`) is a personal, offline speech-to-text CLI for Linux. It records while a configured evdev key is held, transcribes locally with whisper.cpp, and pastes or prints the result when the key is released.
 
-SoundVibes (sv) is an offline speech-to-text tool for Linux. It captures audio from your microphone while you hold a configured evdev key and transcribes locally using whisper.cpp. No cloud, no latency, no subscriptions.
+## Build and install
 
-## Quick Start
-
-### 1. Install
+Initialize the whisper.cpp submodule and install the local checkout with Cargo:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kejne/soundvibes/main/install.sh | sh
+git submodule update --init --recursive
+mise run prepare-dev
+cargo install --path .
 ```
 
-Or download manually from [GitHub Releases](https://github.com/kejne/soundvibes/releases).
+`mise run prepare-dev` currently supports Debian/Ubuntu and Arch-family systems. The binary expects Linux x86_64, ALSA, and optionally Vulkan for GPU acceleration.
 
-### 2. Start the Daemon
+## Configure
 
-```bash
-sv daemon start
-```
-
-### 3. Hold The Recording Key
-
-Configure a Linux evdev key in `~/.config/soundvibes/config.toml`, then hold it while speaking and release it to finish the current recording.
+Create `${XDG_CONFIG_HOME:-~/.config}/soundvibes/config.toml`. Application defaults live in the CLI; a minimal personal configuration only needs a hotkey:
 
 ```toml
 [hotkey]
@@ -34,100 +24,59 @@ enabled = true
 key = "RIGHTCTRL"
 ```
 
-## Documentation
+SoundVibes reads `/dev/input/event*`, so the user running it must have permission to read keyboard event devices. Use `evtest` to find a key name and configure the part after `KEY_`.
 
-- **Website**: [https://soundvibes.teashaped.dev](https://soundvibes.teashaped.dev) - Full documentation with installation guide, configuration reference, and troubleshooting
-- **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and build instructions
+Useful optional settings:
 
-## Output Modes
+```toml
+language = "en"
+model_size = "small"
+model_language = "auto"
+vad = "continuous"
 
-SoundVibes supports explicit output modes:
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `paste` (default) | Copies text with `wl-copy`, pastes with `dotool`, then restores the previous clipboard | KDE/Wayland dictation |
-| `clipboard` | Copies transcript to the clipboard for manual paste | Manual workflows |
-| `type` | Types text directly with `dotool` | Direct input through uinput |
-| `stdout` | Prints transcript to daemon's terminal | Scripting, debugging |
-
-**Important:** Transcripts appear in the **daemon's output**.
-
-```bash
-# Terminal A: Start daemon (transcripts appear HERE)
-sv daemon start --mode stdout
-
-# Hold the configured hotkey to record.
-# Release it to stop and transcribe.
+[output]
+mode = "paste"
+paste_keys = "ctrl+v"
 ```
 
-**With systemd service:** View transcripts with:
+Keep root settings before `[output]` and `[hotkey]`; TOML keys following a table header belong to that table.
+
+## Run
+
 ```bash
-journalctl --user -u sv.service -f
+sv daemon start
 ```
 
-### Continuous Mode
+Hold the configured key while speaking, then release it to finish the recording. Continuous VAD can emit segments during longer holds when it detects pauses.
 
-Continuous mode transcribes and injects text after each pause in speech, even while the recording key is still held:
+Output modes:
+
+- `paste` (default): temporarily copies text, pastes with `dotool`, then restores the clipboard.
+- `clipboard`: leaves the transcript on the clipboard.
+- `type`: types text directly with `dotool`.
+- `stdout`: prints transcripts in the daemon terminal.
+
+Paste and clipboard modes require `wl-clipboard`; automatic paste and type modes require `dotool` plus `/dev/uinput` access.
+
+To run as a user service after `cargo install`, copy the supplied unit:
 
 ```bash
-# Start daemon in continuous mode
-sv daemon start --vad continuous
-
-# Hold the configured hotkey and speak naturally.
-# ... speak sentence 1 ... (pause) → text injected
-# ... speak sentence 2 ... (pause) → text injected
-
-# Release the key when done.
-```
-
-This mode uses whisper.cpp's Silero VAD model (~2MB, auto-downloaded on first use) to detect speech segments.
-
-**Configuration:**
-- `--vad continuous` - Enable continuous transcription mode
-- `--vad-silence-ms` - Silence duration to trigger transcription (default: 800ms)
-
-**Model Selection:**
-- `--model-size tiny|base|small|medium|large|large-v3-turbo` selects the whisper.cpp model family.
-- `--model-language en` selects English-only variants where available.
-- `large-v3-turbo` is multilingual-only; use it with `--model-language auto`.
-
-**Use cases:**
-- Long-form dictation where you want text as you speak
-- Hands-free note-taking with natural pauses
-
-## Quick Tips
-
-**Hotkey Setup:**
-- SoundVibes reads `/dev/input/event*` via evdev, like VoxType.
-- Your user must be able to read keyboard event devices, usually by being in the `input` group.
-- Use `evtest` to find key names; configure the part after `KEY_`, for example `RIGHTCTRL`.
-
-**Systemd Service:**
-```bash
+mkdir -p ~/.config/systemd/user
+cp contrib/sv.service ~/.config/systemd/user/
+systemctl --user daemon-reload
 systemctl --user enable --now sv.service
 ```
 
-**Paste Output:**
+## Development
 
-Paste mode is the default. It uses `wl-copy`/`wl-paste` for clipboard capture and restore, and includes a KDE Klipper history-suppression MIME hint for the temporary transcription copy. The previous clipboard is restored after paste so dictated text does not remain in the active clipboard.
-
-Configuration examples:
+Run the complete local quality gate with:
 
 ```bash
-sv daemon start --mode paste --paste-keys ctrl+v
-sv daemon start --mode paste --paste-keys ctrl+shift+v
+mise run ci
 ```
 
-## Requirements
-
-- Linux x86_64
-- Microphone input device
-- Optional: Vulkan for GPU acceleration
-- `wl-clipboard` (`wl-copy` and `wl-paste`) for paste/clipboard modes
-- `dotool` plus `/dev/uinput` access for automatic paste key simulation and direct type mode
-
-See the [website](https://soundvibes.teashaped.dev) for detailed requirements and configuration options.
+Focused commands and hardware-test flags are documented in `AGENTS.md` and `docs/acceptance-tests.md`.
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+GNU General Public License v3.0; see `LICENSE`.

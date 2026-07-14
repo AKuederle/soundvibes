@@ -583,53 +583,6 @@ fn at07_cpu_fallback() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[test]
-fn at10_marketing_site_builds_and_smoke_test() -> Result<(), Box<dyn Error>> {
-    if env::var("SV_WEB_TESTS").ok().as_deref() != Some("1") {
-        eprintln!("Skipping AT-10; set SV_WEB_TESTS=1 to run.");
-        return Ok(());
-    }
-
-    if !command_available("npm") {
-        eprintln!("Skipping AT-10; npm not available in PATH.");
-        return Ok(());
-    }
-
-    let web_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web");
-    if !web_root.exists() {
-        eprintln!("Skipping AT-10; web/ directory missing.");
-        return Ok(());
-    }
-
-    let install_status = Command::new("npm")
-        .arg("install")
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .current_dir(&web_root)
-        .status()?;
-    if !install_status.success() {
-        return Err("AT-10 failed: npm install did not exit cleanly".into());
-    }
-
-    let build_status = Command::new("npm")
-        .args(["run", "build"])
-        .current_dir(&web_root)
-        .status()?;
-    if !build_status.success() {
-        return Err("AT-10 failed: npm run build did not exit cleanly".into());
-    }
-
-    let smoke_status = Command::new("npm")
-        .args(["run", "test:ui"])
-        .current_dir(&web_root)
-        .status()?;
-    if !smoke_status.success() {
-        return Err("AT-10 failed: npm run test:ui did not exit cleanly".into());
-    }
-
-    Ok(())
-}
-
 #[cfg(feature = "test-support")]
 #[test]
 fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn Error>> {
@@ -673,16 +626,6 @@ fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn
         vec![Duration::from_millis(100), Duration::from_millis(250)]
     );
     Ok(())
-}
-
-fn command_available(command: &str) -> bool {
-    Command::new(command)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
 }
 
 #[cfg(feature = "test-support")]

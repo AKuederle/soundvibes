@@ -621,6 +621,9 @@ fn run_test_audio(config: &Config) -> Result<(), AppError> {
 
         let rms = audio::rms_energy(&buffer);
         let above_threshold = rms >= config.vad_threshold;
+        if !above_threshold {
+            speech_detector.reset();
+        }
         let detected = speech_detector.process(&buffer);
         let status = if detected {
             "DETECTED"

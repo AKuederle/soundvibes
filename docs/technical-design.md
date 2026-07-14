@@ -48,6 +48,9 @@ This document describes the technical design for the `sv` CLI that performs offl
 ### Hotkey Control
 - Run `sv daemon start` to start the background service.
 - Hold the configured evdev key to start recording; release it to stop and transcribe.
+- Monitor udev's `input` subsystem and reconcile `/dev/input/event*` devices when keyboards are added, removed, or replaced.
+- Poll evdev and udev file descriptors together, with a 60-second reconciliation fallback for missed notifications.
+- Track the hold state per keyboard so disconnecting the last pressed device stops recording without affecting another pressed keyboard.
 - Store the socket in `${XDG_RUNTIME_DIR}/soundvibes/sv.sock`.
 - Keep socket commands for daemon lifecycle and external start/stop integration.
 
@@ -113,6 +116,7 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Validate final transcript after capture stops.
 - Confirm offline operation by disconnecting network.
 - Validate hold-to-record key press/release behavior.
+- Reconnect an external keyboard and confirm its hold key works without restarting the daemon.
 - Validate paste output in a focused Wayland editor.
 - Validate GPU usage on NVIDIA/AMD systems by checking whisper.cpp startup logs, and verify CPU fallback on systems without a supported GPU backend.
 

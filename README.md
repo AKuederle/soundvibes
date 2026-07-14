@@ -12,7 +12,7 @@ mise run prepare-dev
 cargo install --path .
 ```
 
-`mise run prepare-dev` currently supports Debian/Ubuntu and Arch-family systems. The binary expects Linux x86_64, ALSA, and optionally Vulkan for GPU acceleration.
+`mise run prepare-dev` currently supports Debian/Ubuntu and Arch-family systems. The binary expects Linux x86_64, ALSA, libudev, and optionally Vulkan for GPU acceleration.
 
 ## Configure
 

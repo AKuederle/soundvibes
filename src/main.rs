@@ -198,30 +198,10 @@ fn resolve_cli_mode(cli: &Cli) -> CliMode {
 
 #[derive(Debug, Clone)]
 struct Config {
-    model_path: Option<PathBuf>,
     model_size: ModelSize,
     model_language: ModelLanguage,
-    download_model: bool,
-    language: String,
-    device: Option<String>,
-    audio_host: AudioHost,
-    sample_rate: u32,
-    format: OutputFormat,
-    output: OutputConfig,
-    vad: VadMode,
-    vad_silence_ms: u64,
-    vad_threshold: f32,
-    vad_chunk_ms: u64,
-    segment_target_ms: u64,
-    segment_grace_ms: u64,
-    segment_overlap_ms: u64,
-    segment_min_ms: u64,
-    debug_audio: bool,
     list_devices: bool,
-    dump_audio: bool,
-    audio_feedback: bool,
-    no_speech_timeout_ms: u64,
-    hotkey: HotkeyConfig,
+    daemon: daemon::DaemonConfig,
 }
 
 struct ConfigSources<'a> {
@@ -345,30 +325,32 @@ impl Config {
         let model_path = sources.optional("model", cli.model, file_model_path);
 
         Self {
-            model_path,
             model_size,
             model_language,
-            download_model,
-            language,
-            device,
-            audio_host,
-            sample_rate,
-            format,
-            output,
-            vad,
-            vad_silence_ms,
-            vad_threshold,
-            vad_chunk_ms,
-            segment_target_ms,
-            segment_grace_ms,
-            segment_overlap_ms,
-            segment_min_ms,
-            debug_audio,
             list_devices,
-            dump_audio,
-            audio_feedback,
-            no_speech_timeout_ms,
-            hotkey,
+            daemon: daemon::DaemonConfig {
+                model_path,
+                download_model,
+                language,
+                device,
+                audio_host,
+                sample_rate,
+                format,
+                output,
+                vad,
+                vad_silence_ms,
+                vad_threshold,
+                vad_chunk_ms,
+                segment_target_ms,
+                segment_grace_ms,
+                segment_overlap_ms,
+                segment_min_ms,
+                debug_audio,
+                dump_audio,
+                audio_feedback,
+                no_speech_timeout_ms,
+                hotkey,
+            },
         }
     }
 }
@@ -447,7 +429,11 @@ fn main() {
         None
     } else {
         let spec = ModelSpec::new(config.model_size, config.model_language);
-        match sv::model::prepare_model(config.model_path.as_deref(), &spec, config.download_model) {
+        match sv::model::prepare_model(
+            config.daemon.model_path.as_deref(),
+            &spec,
+            config.daemon.download_model,
+        ) {
             Ok(prepared) => Some(prepared),
             Err(err) => {
                 eprintln!("error: {err}");
@@ -463,58 +449,35 @@ fn main() {
         }
         println!("Model: {}", prepared.path.display());
     }
-    println!("Language: {}", config.language);
-    println!("Sample rate: {} Hz", config.sample_rate);
-    println!("Format: {:?}", config.format);
-    println!("Mode: {:?}", config.output.mode);
-    println!("VAD: {:?}", config.vad);
-    println!("VAD silence timeout: {} ms", config.vad_silence_ms);
-    println!("VAD threshold: {:.4}", config.vad_threshold);
-    println!("VAD chunk: {} ms", config.vad_chunk_ms);
-    println!("Segment target: {} ms", config.segment_target_ms);
-    println!("Segment grace: {} ms", config.segment_grace_ms);
-    println!("Segment overlap: {} ms", config.segment_overlap_ms);
-    println!("Segment minimum: {} ms", config.segment_min_ms);
-    println!("Dump audio: {}", config.dump_audio);
-    println!("Audio host: {:?}", config.audio_host);
-    if let Some(device) = &config.device {
+    println!("Language: {}", config.daemon.language);
+    println!("Sample rate: {} Hz", config.daemon.sample_rate);
+    println!("Format: {:?}", config.daemon.format);
+    println!("Mode: {:?}", config.daemon.output.mode);
+    println!("VAD: {:?}", config.daemon.vad);
+    println!("VAD silence timeout: {} ms", config.daemon.vad_silence_ms);
+    println!("VAD threshold: {:.4}", config.daemon.vad_threshold);
+    println!("VAD chunk: {} ms", config.daemon.vad_chunk_ms);
+    println!("Segment target: {} ms", config.daemon.segment_target_ms);
+    println!("Segment grace: {} ms", config.daemon.segment_grace_ms);
+    println!("Segment overlap: {} ms", config.daemon.segment_overlap_ms);
+    println!("Segment minimum: {} ms", config.daemon.segment_min_ms);
+    println!("Dump audio: {}", config.daemon.dump_audio);
+    println!("Audio host: {:?}", config.daemon.audio_host);
+    if let Some(device) = &config.daemon.device {
         println!("Device: {device}");
     }
 
     let result = if config.list_devices {
-        run_list_devices(&config)
+        run_list_devices(&config.daemon)
     } else if mode == CliMode::TestAudio {
-        run_test_audio(&config)
+        run_test_audio(&config.daemon)
     } else {
-        let model_path = prepared_model
+        config.daemon.model_path = prepared_model
             .as_ref()
             .map(|prepared| prepared.path.clone());
-        let daemon_config = daemon::DaemonConfig {
-            model_path,
-            download_model: config.download_model,
-            language: config.language.clone(),
-            device: config.device.clone(),
-            audio_host: config.audio_host,
-            sample_rate: config.sample_rate,
-            format: config.format,
-            output: config.output.clone(),
-            vad: config.vad,
-            vad_silence_ms: config.vad_silence_ms,
-            vad_threshold: config.vad_threshold,
-            vad_chunk_ms: config.vad_chunk_ms,
-            segment_target_ms: config.segment_target_ms,
-            segment_grace_ms: config.segment_grace_ms,
-            segment_overlap_ms: config.segment_overlap_ms,
-            segment_min_ms: config.segment_min_ms,
-            debug_audio: config.debug_audio,
-            dump_audio: config.dump_audio,
-            audio_feedback: config.audio_feedback,
-            no_speech_timeout_ms: config.no_speech_timeout_ms,
-            hotkey: config.hotkey.clone(),
-        };
         let deps = daemon::DaemonDeps::default();
         let mut output = daemon::StdoutOutput;
-        daemon::run_daemon(&daemon_config, &deps, &mut output)
+        daemon::run_daemon(&config.daemon, &deps, &mut output)
     };
 
     if let Err(err) = result {
@@ -554,7 +517,7 @@ fn config_path() -> Option<PathBuf> {
     Some(config_home.join("soundvibes").join("config.toml"))
 }
 
-fn run_list_devices(config: &Config) -> Result<(), AppError> {
+fn run_list_devices(config: &daemon::DaemonConfig) -> Result<(), AppError> {
     let host = daemon::select_audio_host(config.audio_host)?;
     audio::configure_alsa_logging(config.debug_audio);
     let devices = audio::list_input_devices(&host).map_err(|err| AppError::audio(err.message))?;
@@ -565,7 +528,7 @@ fn run_list_devices(config: &Config) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_test_audio(config: &Config) -> Result<(), AppError> {
+fn run_test_audio(config: &daemon::DaemonConfig) -> Result<(), AppError> {
     use std::io::Write;
 
     let host = daemon::select_audio_host(config.audio_host)?;
@@ -816,13 +779,13 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
         let config = Config::from_sources(cli, &matches, FileConfig::default());
 
-        assert_eq!(config.output.mode, OutputMode::Paste);
-        assert!(config.output.restore_clipboard);
-        assert_eq!(config.output.paste_keys, "ctrl+v");
-        assert_eq!(config.output.pre_paste_delay_ms, 100);
-        assert_eq!(config.output.restore_clipboard_delay_ms, 250);
-        assert!(config.hotkey.enabled);
-        assert_eq!(config.hotkey.key, None);
+        assert_eq!(config.daemon.output.mode, OutputMode::Paste);
+        assert!(config.daemon.output.restore_clipboard);
+        assert_eq!(config.daemon.output.paste_keys, "ctrl+v");
+        assert_eq!(config.daemon.output.pre_paste_delay_ms, 100);
+        assert_eq!(config.daemon.output.restore_clipboard_delay_ms, 250);
+        assert!(config.daemon.hotkey.enabled);
+        assert_eq!(config.daemon.hotkey.key, None);
     }
 
     #[test]
@@ -842,8 +805,8 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
         let config = Config::from_sources(cli, &matches, file);
 
-        assert!(config.hotkey.enabled);
-        assert_eq!(config.hotkey.key.as_deref(), Some("RIGHTCTRL"));
+        assert!(config.daemon.hotkey.enabled);
+        assert_eq!(config.daemon.hotkey.key.as_deref(), Some("RIGHTCTRL"));
     }
 
     #[test]
@@ -866,11 +829,11 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
         let config = Config::from_sources(cli, &matches, file);
 
-        assert_eq!(config.output.mode, OutputMode::Clipboard);
-        assert_eq!(config.output.paste_keys, "ctrl+shift+v");
-        assert!(!config.output.restore_clipboard);
-        assert_eq!(config.output.pre_paste_delay_ms, 150);
-        assert_eq!(config.output.restore_clipboard_delay_ms, 400);
+        assert_eq!(config.daemon.output.mode, OutputMode::Clipboard);
+        assert_eq!(config.daemon.output.paste_keys, "ctrl+shift+v");
+        assert!(!config.daemon.output.restore_clipboard);
+        assert_eq!(config.daemon.output.pre_paste_delay_ms, 150);
+        assert_eq!(config.daemon.output.restore_clipboard_delay_ms, 400);
     }
 
     #[test]
@@ -899,9 +862,9 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
         let config = Config::from_sources(cli, &matches, file);
 
-        assert_eq!(config.segment_target_ms, 7000);
-        assert_eq!(config.segment_grace_ms, 1500);
-        assert_eq!(config.segment_overlap_ms, 250);
-        assert_eq!(config.segment_min_ms, 900);
+        assert_eq!(config.daemon.segment_target_ms, 7000);
+        assert_eq!(config.daemon.segment_grace_ms, 1500);
+        assert_eq!(config.daemon.segment_overlap_ms, 250);
+        assert_eq!(config.daemon.segment_min_ms, 900);
     }
 }

@@ -16,7 +16,7 @@ cargo install --path .
 
 ## Configure
 
-Create `${XDG_CONFIG_HOME:-~/.config}/soundvibes/config.toml`. Application defaults live in the CLI; a minimal personal configuration only needs a hotkey:
+Create `$XDG_CONFIG_HOME/soundvibes/config.toml`, or `~/.config/soundvibes/config.toml` when `XDG_CONFIG_HOME` is unset. Application defaults live in the CLI; a minimal personal configuration only needs a hotkey:
 
 ```toml
 [hotkey]

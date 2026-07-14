@@ -26,7 +26,7 @@ This PRD is a living document and should be updated as product requirements and 
 - Configuration via `config.toml` in the XDG config directory.
 - Works on Linux x86_64.
 - Daemon mode that listens for evdev key press/release events.
-- Daemon mode can inject transcribed text at the cursor when requested.
+- Daemon mode can paste or type transcribed text at the cursor when requested.
 
 ## Non-Goals
 - GUI or tray integration.
@@ -59,7 +59,7 @@ This PRD is a living document and should be updated as product requirements and 
 - Inference: whisper.cpp via Rust FFI bindings, using quantized small models with GPU acceleration when available.
 - Output: final text output to stdout after transcription completes.
 - Control plane: daemon listens for evdev key events and keeps a local socket for lifecycle commands.
-- Text injection: Wayland portal virtual keyboard or X11 XTest.
+- Text output: Wayland clipboard access through `wl-clipboard` and key input through `dotool`.
 
 ## Model Choice
 - Engine: whisper.cpp (FFI) for best accuracy-to-size tradeoff.
@@ -87,7 +87,7 @@ This PRD is a living document and should be updated as product requirements and 
 - Verify transcript appears shortly after releasing the configured key.
 - Confirm tool runs without network access.
 - Validate daemon hold-to-record control.
-- Validate text injection into a focused editor.
+- Validate paste output in a focused Wayland editor.
 - Validate CI runs the same quality gate command as local development.
 
 ## Risks & Mitigations
@@ -96,4 +96,4 @@ This PRD is a living document and should be updated as product requirements and 
 - Audio capture issues on some devices: provide device selection flag.
 - Model size too large: allow user to swap model via CLI flag.
 - Hotkey permissions vary by distro: document input group or udev setup.
-- Text injection permissions vary by compositor: document portal prompts and limitations.
+- Paste permissions vary by session: fall back to stdout when clipboard or uinput access is unavailable.

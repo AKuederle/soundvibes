@@ -14,7 +14,7 @@ description = "Run full CI quality gates"
 run = "cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features && cargo build --release"
 
 [tasks.build-release]
-description = "Build release binary"
+description = "Build optimized local binary"
 run = "cargo build --release"
 
 [tasks.prepare-dev]

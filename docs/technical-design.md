@@ -51,11 +51,11 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Store the socket in `${XDG_RUNTIME_DIR}/soundvibes/sv.sock`.
 - Keep socket commands for daemon lifecycle and external start/stop integration.
 
-### Text Injection
-- Use a backend abstraction for output delivery.
-- Wayland: use portal virtual keyboard or input capture APIs.
-- X11: use XTest to synthesize keypresses into the focused window.
-- If injection is unavailable, fallback to stdout with a warning.
+### Text Output
+- Use an output mode to select stdout, clipboard, paste, or direct typing.
+- Use `wl-clipboard` to capture and restore the Wayland clipboard.
+- Use `dotool` for paste shortcuts and direct typing through `/dev/uinput`.
+- If configured output is unavailable, fall back to stdout with a warning.
 
 ### Daemon Mode
 - Long-running process that listens for evdev key press/release events.
@@ -76,7 +76,7 @@ This document describes the technical design for the `sv` CLI that performs offl
 - If `model_path` is provided, download or resolve the model there instead of the default location.
 
 ### GPU Backend Selection
-- Build whisper.cpp with GPU backends enabled (Vulkan for AMD/NVIDIA, CUDA for NVIDIA when available).
+- Build whisper.cpp with Vulkan enabled for supported AMD/NVIDIA devices.
 - Always enable GPU usage in runtime params; rely on whisper.cpp backend detection to select the first supported device.
 - Do not expose GPU selection to the user; if no GPU backend is available, inference continues on CPU.
 
@@ -113,10 +113,8 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Validate final transcript after capture stops.
 - Confirm offline operation by disconnecting network.
 - Validate hold-to-record key press/release behavior.
-- Validate injection into a focused editor.
+- Validate paste output in a focused Wayland editor.
 - Validate GPU usage on NVIDIA/AMD systems by checking whisper.cpp startup logs, and verify CPU fallback on systems without a supported GPU backend.
 
 ## Open Questions
-- Best default model (tiny vs base) for CPU speed.
-- VAD threshold calibration on typical laptop microphones.
-- Best supported portal for text injection across compositors.
+- VAD threshold calibration on the local microphone.

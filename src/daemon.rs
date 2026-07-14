@@ -311,8 +311,7 @@ pub fn run_daemon_loop(
                             Ok(new_transcriber) => {
                                 worker.reload(new_transcriber)?;
                                 output.stdout(&format!(
-                                    "Model reloaded: size={}, model-language={}",
-                                    size, model_language
+                                    "Model reloaded: size={size}, model-language={model_language}"
                                 ));
                             }
                             Err(err) => {
@@ -772,7 +771,7 @@ pub fn send_set_model_command(
     size: ModelSize,
     model_language: ModelLanguage,
 ) -> Result<(), AppError> {
-    let command = format!("set-model size={} model-language={}", size, model_language);
+    let command = format!("set-model size={size} model-language={model_language}");
     send_daemon_command(&command)
 }
 

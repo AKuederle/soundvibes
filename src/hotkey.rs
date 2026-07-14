@@ -100,17 +100,13 @@ fn open_keyboard_devices(input_dir: &Path) -> Result<Vec<Device>, AppError> {
 fn is_event_device(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name.starts_with("event"))
-        .unwrap_or(false)
+        .is_some_and(|name| name.starts_with("event"))
 }
 
 fn is_keyboard(device: &Device) -> bool {
-    device
-        .supported_keys()
-        .map(|keys| {
-            keys.contains(Key::KEY_A) && keys.contains(Key::KEY_Z) && keys.contains(Key::KEY_ENTER)
-        })
-        .unwrap_or(false)
+    device.supported_keys().is_some_and(|keys| {
+        keys.contains(Key::KEY_A) && keys.contains(Key::KEY_Z) && keys.contains(Key::KEY_ENTER)
+    })
 }
 
 fn set_nonblocking(device: &Device) {
@@ -136,7 +132,6 @@ fn hotkey_event(target: Key, key: Key, value: i32, pressed: &mut bool) -> Option
             *pressed = false;
             Some(ControlEvent::StopRecording)
         }
-        2 => None,
         _ => None,
     }
 }

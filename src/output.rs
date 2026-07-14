@@ -247,33 +247,23 @@ fn restore_clipboard_snapshot(
     snapshot: Option<&ClipboardSnapshot>,
     runner: &mut dyn CommandRunner,
 ) -> Result<(), OutputError> {
-    match snapshot {
-        Some(snapshot) => {
-            let args = vec!["--type".to_string(), snapshot.mime_type.clone()];
-            let status = runner
-                .status_with_stdin("wl-copy", &args, &snapshot.data)
-                .map_err(|err| OutputError::new(format!("failed to restore clipboard: {err}")))?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(OutputError::new(format!(
-                    "wl-copy restore exited with status {status}"
-                )))
-            }
-        }
-        None => {
-            let args = vec!["--clear".to_string()];
-            let status = runner
-                .status_with_stdin("wl-copy", &args, &[])
-                .map_err(|err| OutputError::new(format!("failed to clear clipboard: {err}")))?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(OutputError::new(format!(
-                    "wl-copy clear exited with status {status}"
-                )))
-            }
-        }
+    let (action, args, data) = match snapshot {
+        Some(snapshot) => (
+            "restore",
+            vec!["--type".to_string(), snapshot.mime_type.clone()],
+            snapshot.data.as_slice(),
+        ),
+        None => ("clear", vec!["--clear".to_string()], &[][..]),
+    };
+    let status = runner
+        .status_with_stdin("wl-copy", &args, data)
+        .map_err(|err| OutputError::new(format!("failed to {action} clipboard: {err}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(OutputError::new(format!(
+            "wl-copy {action} exited with status {status}"
+        )))
     }
 }
 

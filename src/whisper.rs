@@ -168,9 +168,7 @@ impl WhisperContext {
         samples: &[f32],
         language: Option<&str>,
     ) -> Result<String, WhisperError> {
-        let available_threads = thread::available_parallelism()
-            .map(|count| count.get())
-            .unwrap_or(1);
+        let available_threads = thread::available_parallelism().map_or(1, std::num::NonZero::get);
         let n_threads = (available_threads / 2).max(1) as i32;
 
         let detect_language = language.is_none();

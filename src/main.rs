@@ -478,9 +478,8 @@ fn main() {
 }
 
 fn load_config_file() -> Result<FileConfig, AppError> {
-    let path = match config_path() {
-        Some(path) => path,
-        None => return Ok(FileConfig::default()),
+    let Some(path) = config_path() else {
+        return Ok(FileConfig::default());
     };
 
     if !path.exists() {

@@ -17,17 +17,17 @@ pub const DEFAULT_CHUNK_MS: u64 = 100;
 pub const DEFAULT_VAD_THRESHOLD: f32 = 0.010;
 pub const DEFAULT_SILENCE_TIMEOUT_MS: u64 = 1200;
 
-pub struct VadConfig {
-    pub enabled: bool,
-    pub energy_threshold: f32,
-    pub silence_timeout: Duration,
-    pub chunk_size: Duration,
+pub(crate) struct VadConfig {
+    pub(crate) enabled: bool,
+    pub(crate) energy_threshold: f32,
+    pub(crate) silence_timeout: Duration,
+    pub(crate) chunk_size: Duration,
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct SegmentInfo {
-    pub index: u64,
-    pub duration_ms: u64,
+pub(crate) struct SegmentInfo {
+    pub(crate) index: u64,
+    pub(crate) duration_ms: u64,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -64,7 +64,7 @@ impl fmt::Display for AudioError {
 impl Error for AudioError {}
 
 impl VadConfig {
-    pub fn new(
+    pub(crate) fn new(
         enabled: bool,
         silence_timeout_ms: u64,
         energy_threshold: f32,
@@ -265,7 +265,11 @@ pub fn drain_samples(capture: &mut Capture, output: &mut Vec<f32>) {
     }
 }
 
-pub fn trim_trailing_silence(samples: &[f32], sample_rate: u32, vad: &VadConfig) -> Vec<f32> {
+pub(crate) fn trim_trailing_silence(
+    samples: &[f32],
+    sample_rate: u32,
+    vad: &VadConfig,
+) -> Vec<f32> {
     if samples.is_empty() || !vad.enabled {
         return samples.to_vec();
     }

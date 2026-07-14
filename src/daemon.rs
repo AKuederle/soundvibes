@@ -20,9 +20,8 @@ use crate::hotkey::{self, HotkeyConfig};
 use crate::model::{self, ModelLanguage, ModelSize, ModelSpec};
 use crate::output::{self, OutputConfig, OutputMode};
 use crate::segmentation::{self, CutReason, SegmentConfig, SegmentDecision};
-use crate::transcription_worker::{
-    Transcriber, TranscriptionJob, TranscriptionResult, TranscriptionWorker,
-};
+pub use crate::transcription_worker::Transcriber;
+use crate::transcription_worker::{TranscriptionJob, TranscriptionResult, TranscriptionWorker};
 use crate::types::{AudioHost, OutputFormat, VadMode};
 use crate::whisper::WhisperContext;
 

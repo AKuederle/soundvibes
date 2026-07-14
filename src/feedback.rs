@@ -5,11 +5,11 @@ use std::process::Command;
 const SOUND_START: &str = "/usr/share/sounds/freedesktop/stereo/device-added.oga";
 const SOUND_STOP: &str = "/usr/share/sounds/freedesktop/stereo/complete.oga";
 
-pub fn play_start_sound() {
+pub(crate) fn play_start_sound() {
     play_sound(SOUND_START);
 }
 
-pub fn play_stop_sound() {
+pub(crate) fn play_stop_sound() {
     play_sound(SOUND_STOP);
 }
 

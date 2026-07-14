@@ -98,22 +98,15 @@ pub fn prepare_model(
     spec: &ModelSpec,
     allow_download: bool,
 ) -> Result<PreparedModel, AppError> {
-    let path = resolve_model_path_result(explicit_path, spec)?;
+    let path = match explicit_path {
+        Some(path) => path.to_path_buf(),
+        None => default_model_dir().join(spec.filename_result()?),
+    };
     let downloaded = ensure_model_available(&path, spec, allow_download)?;
     Ok(PreparedModel { path, downloaded })
 }
 
-fn resolve_model_path_result(
-    explicit_path: Option<&Path>,
-    spec: &ModelSpec,
-) -> Result<PathBuf, AppError> {
-    match explicit_path {
-        Some(path) => Ok(path.to_path_buf()),
-        None => Ok(default_model_dir().join(spec.filename_result()?)),
-    }
-}
-
-pub fn default_model_dir() -> PathBuf {
+fn default_model_dir() -> PathBuf {
     let data_home = env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))

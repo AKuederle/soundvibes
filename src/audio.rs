@@ -445,12 +445,7 @@ fn select_stream_config(
         let format = config.sample_format();
         let candidate = (stream_config, format);
         let rank = sample_format_rank(format);
-        if channels == 1 {
-            if best.is_none() || rank > best_rank {
-                best = Some(candidate);
-                best_rank = rank;
-            }
-        } else if best.is_none() || rank > best_rank {
+        if best.is_none() || rank > best_rank {
             best = Some(candidate);
             best_rank = rank;
         }
@@ -468,7 +463,7 @@ fn sample_format_rank(format: cpal::SampleFormat) -> u8 {
     match format {
         cpal::SampleFormat::F32 => 6,
         cpal::SampleFormat::F64 => 5,
-        cpal::SampleFormat::I32 => 4,
+        cpal::SampleFormat::I32 | cpal::SampleFormat::U32 => 4,
         cpal::SampleFormat::I16 => 3,
         cpal::SampleFormat::U16 => 2,
         cpal::SampleFormat::I8 => 1,
@@ -602,5 +597,13 @@ mod speech_detector_tests {
         detector.reset();
         assert!(!detector.is_detected());
         assert_eq!(detector.speech_samples(), 0);
+    }
+
+    #[test]
+    fn unsigned_32_bit_samples_rank_with_signed_32_bit_samples() {
+        assert_eq!(
+            sample_format_rank(cpal::SampleFormat::U32),
+            sample_format_rank(cpal::SampleFormat::I32)
+        );
     }
 }

@@ -281,7 +281,9 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
             vec!["Mic".to_string()],
             vec![vec![0.2; 160]],
         )),
-        transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["hello".to_string()])),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
+            "hello\n\"world\"\u{0008}".to_string(),
+        ])),
     };
     let config = DaemonConfig {
         format: OutputFormat::Jsonl,
@@ -306,7 +308,7 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
         .ok_or("missing JSONL output")?;
     let parsed: Value = serde_json::from_str(json_line)?;
     assert_eq!(parsed["type"], "final");
-    assert_eq!(parsed["text"], "hello");
+    assert_eq!(parsed["text"], "hello\n\"world\"\u{0008}");
     assert!(parsed["timestamp"].as_str().is_some());
     assert!(parsed["utterance"].as_u64().is_some());
     assert!(parsed["duration_ms"].as_u64().is_some());

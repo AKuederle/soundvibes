@@ -485,7 +485,7 @@ fn emit_worker_result(
                 transcript
             };
             if !text.trim().is_empty() {
-                if let Err(err) = emit_transcript(
+                emit_transcript(
                     config,
                     output,
                     &text,
@@ -493,11 +493,8 @@ fn emit_worker_result(
                         index: result.index,
                         duration_ms: result.duration_ms,
                     },
-                ) {
-                    output.stderr(&format!("Failed to emit transcript: {err}"));
-                } else {
-                    *last_emitted_transcript = text;
-                }
+                );
+                *last_emitted_transcript = text;
             }
         }
         Err(err) => output.stderr(&format!("Transcription error: {err}")),
@@ -540,15 +537,13 @@ fn emit_transcript(
     output: &mut dyn DaemonOutput,
     text: &str,
     info: audio::SegmentInfo,
-) -> Result<(), String> {
+) {
     match config.output.mode {
         OutputMode::Stdout => emit_stdout(config.format, output, text, info),
         OutputMode::Clipboard => {
             if let Err(err) = output::output_text(text, &config.output) {
                 output.stderr(&format!("warn: {err}; falling back to stdout"));
                 emit_stdout(config.format, output, text, info)
-            } else {
-                Ok(())
             }
         }
         OutputMode::Paste | OutputMode::Type => {
@@ -556,8 +551,6 @@ fn emit_transcript(
             if let Err(err) = output::output_text(&insertion_text, &config.output) {
                 output.stderr(&format!("warn: {err}; falling back to stdout"));
                 emit_stdout(config.format, output, text, info)
-            } else {
-                Ok(())
             }
         }
     }
@@ -580,30 +573,24 @@ fn emit_stdout(
     output: &mut dyn DaemonOutput,
     text: &str,
     info: audio::SegmentInfo,
-) -> Result<(), String> {
+) {
     match format {
         OutputFormat::Plain => {
             output.stdout(&format!("Transcript {}: {}", info.index, text));
         }
         OutputFormat::Jsonl => {
-            let escaped = json_escape(text);
-            let timestamp = Utc::now().to_rfc3339();
-            output.stdout(&format!(
-                "{{\"type\":\"final\",\"utterance\":{},\"duration_ms\":{},\"timestamp\":\"{}\",\"text\":\"{}\"}}",
-                info.index, info.duration_ms, timestamp, escaped
-            ));
+            output.stdout(
+                &serde_json::json!({
+                    "type": "final",
+                    "utterance": info.index,
+                    "duration_ms": info.duration_ms,
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "text": text,
+                })
+                .to_string(),
+            );
         }
     }
-    Ok(())
-}
-
-fn json_escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
 }
 
 fn dump_audio_samples(

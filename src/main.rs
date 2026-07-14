@@ -200,7 +200,6 @@ fn resolve_cli_mode(cli: &Cli) -> CliMode {
 struct Config {
     model_size: ModelSize,
     model_language: ModelLanguage,
-    list_devices: bool,
     daemon: daemon::DaemonConfig,
 }
 
@@ -299,7 +298,6 @@ impl Config {
         let segment_min_ms =
             sources.value("segment_min_ms", cli.segment_min_ms, file.segment_min_ms);
         let debug_audio = sources.value("debug_audio", cli.debug_audio, file.debug_audio);
-        let list_devices = sources.value("list_devices", cli.list_devices, file.list_devices);
         let dump_audio = sources.value("dump_audio", cli.dump_audio, file.dump_audio);
         let audio_feedback =
             sources.value("audio_feedback", cli.audio_feedback, file.audio_feedback);
@@ -327,7 +325,6 @@ impl Config {
         Self {
             model_size,
             model_language,
-            list_devices,
             daemon: daemon::DaemonConfig {
                 model_path,
                 download_model,
@@ -378,7 +375,6 @@ struct FileConfig {
     segment_overlap_ms: Option<u64>,
     segment_min_ms: Option<u64>,
     debug_audio: Option<bool>,
-    list_devices: Option<bool>,
     dump_audio: Option<bool>,
     audio_feedback: Option<bool>,
     no_speech_timeout_ms: Option<u64>,
@@ -421,13 +417,8 @@ fn main() {
         }
     };
     let mut config = Config::from_sources(cli, &matches, file_config);
-    if mode == CliMode::RunDaemon {
-        config.list_devices = false;
-    }
 
-    let prepared_model = if config.list_devices {
-        None
-    } else {
+    let prepared_model = if mode == CliMode::RunDaemon {
         let spec = ModelSpec::new(config.model_size, config.model_language);
         match sv::model::prepare_model(
             config.daemon.model_path.as_deref(),
@@ -440,6 +431,8 @@ fn main() {
                 process::exit(err.exit_code());
             }
         }
+    } else {
+        None
     };
 
     println!("SoundVibes sv {}", env!("CARGO_PKG_VERSION"));
@@ -467,14 +460,12 @@ fn main() {
         println!("Device: {device}");
     }
 
-    let result = if config.list_devices {
+    let result = if mode == CliMode::ListDevices {
         run_list_devices(&config.daemon)
     } else if mode == CliMode::TestAudio {
         run_test_audio(&config.daemon)
     } else {
-        config.daemon.model_path = prepared_model
-            .as_ref()
-            .map(|prepared| prepared.path.clone());
+        config.daemon.model_path = prepared_model.map(|prepared| prepared.path);
         let deps = daemon::DaemonDeps::default();
         let mut output = daemon::StdoutOutput;
         daemon::run_daemon(&config.daemon, &deps, &mut output)

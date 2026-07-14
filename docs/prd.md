@@ -78,7 +78,7 @@ This PRD is a living document and should be updated as product requirements and 
 
 ## Configuration
 - Load config from XDG base directory if available.
-- Default path: `${XDG_CONFIG_HOME:-~/.config}/soundvibes/config.toml`.
+- Default path: `$XDG_CONFIG_HOME/soundvibes/config.toml`, or `~/.config/soundvibes/config.toml` when the variable is unset.
 - Config file format: TOML.
 - Config keys: `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
 

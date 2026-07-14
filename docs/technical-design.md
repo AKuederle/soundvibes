@@ -23,7 +23,7 @@ This document describes the technical design for the `sv` CLI that performs offl
 ## Components
 
 ### Config
-- Load settings from `${XDG_CONFIG_HOME:-~/.config}/soundvibes/config.toml`.
+- Load settings from `$XDG_CONFIG_HOME/soundvibes/config.toml`, defaulting to `~/.config/soundvibes/config.toml` when the variable is unset.
 - CLI flags complement configuration and override file values when present.
 - Defaults are applied if keys are missing.
 - Configuration struct shared across pipeline components.

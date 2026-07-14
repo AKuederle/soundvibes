@@ -642,6 +642,9 @@ fn at12_daemon_status_is_acknowledged() -> Result<(), Box<dyn Error>> {
     let runtime_dir = temp_dir("soundvibes-acceptance-runtime");
     fs::create_dir_all(&runtime_dir)?;
     let _runtime_guard = EnvGuard::set("XDG_RUNTIME_DIR", &runtime_dir);
+    let data_dir = temp_dir("soundvibes-acceptance-data");
+    fs::create_dir_all(&data_dir)?;
+    let _data_guard = EnvGuard::set("XDG_DATA_HOME", &data_dir);
     let socket_path = sv::daemon::daemon_socket_path()?;
     let (_socket_guard, receiver, _sender) = sv::daemon::start_socket_listener(&socket_path)?;
 

@@ -4,7 +4,7 @@ test("renders hero and quickstart", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: /capture voice notes/i })).toBeVisible();
-  await expect(page.getByRole("link", { name: /download from github releases/i })).toBeVisible();
+  await expect(page.getByRole("link", { name: /view github releases/i })).toBeVisible();
 
   const quickstart = page.locator("[data-smoke='quickstart']");
   await expect(quickstart).toBeVisible();

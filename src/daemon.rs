@@ -853,14 +853,49 @@ impl Transcriber for WhisperTranscriber {
 pub mod test_support {
     use std::collections::VecDeque;
     use std::path::Path;
-    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
 
     use super::{
-        AudioBackend, CaptureSource, ControlEvent, DaemonOutput, Transcriber, TranscriberFactory,
+        AudioBackend, CaptureSource, DaemonConfig, DaemonOutput, Transcriber, TranscriberFactory,
     };
     use crate::audio::{AudioError, AudioErrorKind};
     use crate::error::AppError;
+    use crate::hotkey::HotkeyConfig;
+    use crate::output::{OutputConfig, OutputMode};
+    use crate::segmentation::{
+        DEFAULT_SEGMENT_GRACE_MS, DEFAULT_SEGMENT_MIN_MS, DEFAULT_SEGMENT_OVERLAP_MS,
+        DEFAULT_SEGMENT_TARGET_MS,
+    };
+    use crate::types::{AudioHost, OutputFormat, VadMode};
+
+    pub fn daemon_config() -> DaemonConfig {
+        DaemonConfig {
+            model_path: None,
+            download_model: false,
+            language: "en".to_string(),
+            device: None,
+            audio_host: AudioHost::Default,
+            sample_rate: 16_000,
+            format: OutputFormat::Plain,
+            output: OutputConfig {
+                mode: OutputMode::Stdout,
+                ..OutputConfig::default()
+            },
+            vad: VadMode::Off,
+            vad_silence_ms: 800,
+            vad_threshold: 0.015,
+            vad_chunk_ms: 250,
+            segment_target_ms: DEFAULT_SEGMENT_TARGET_MS,
+            segment_grace_ms: DEFAULT_SEGMENT_GRACE_MS,
+            segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
+            segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
+            debug_audio: false,
+            dump_audio: false,
+            audio_feedback: false,
+            no_speech_timeout_ms: 0,
+            hotkey: HotkeyConfig::default(),
+        }
+    }
 
     #[derive(Default)]
     pub struct TestOutput {
@@ -1011,10 +1046,6 @@ pub mod test_support {
             }
         }
     }
-
-    pub fn control_channel() -> (mpsc::Sender<ControlEvent>, mpsc::Receiver<ControlEvent>) {
-        mpsc::channel()
-    }
 }
 
 #[cfg(test)]
@@ -1028,45 +1059,12 @@ mod tests {
     use std::time::Duration;
 
     use super::test_support::{
-        control_channel, TestAudioBackend, TestOutput, TestTranscriberFactory,
+        daemon_config, TestAudioBackend, TestOutput, TestTranscriberFactory,
     };
-    use crate::segmentation::{
-        DEFAULT_SEGMENT_GRACE_MS, DEFAULT_SEGMENT_MIN_MS, DEFAULT_SEGMENT_OVERLAP_MS,
-        DEFAULT_SEGMENT_TARGET_MS,
-    };
-
-    fn test_config() -> DaemonConfig {
-        DaemonConfig {
-            model_path: None,
-            download_model: false,
-            language: "en".to_string(),
-            device: None,
-            audio_host: AudioHost::Default,
-            sample_rate: 16_000,
-            format: OutputFormat::Plain,
-            output: OutputConfig {
-                mode: OutputMode::Stdout,
-                ..OutputConfig::default()
-            },
-            vad: VadMode::Off,
-            vad_silence_ms: 800,
-            vad_threshold: 0.015,
-            vad_chunk_ms: 250,
-            segment_target_ms: DEFAULT_SEGMENT_TARGET_MS,
-            segment_grace_ms: DEFAULT_SEGMENT_GRACE_MS,
-            segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
-            segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
-            debug_audio: false,
-            dump_audio: false,
-            audio_feedback: false,
-            no_speech_timeout_ms: 0,
-            hotkey: HotkeyConfig::default(),
-        }
-    }
 
     #[test]
     fn daemon_loop_emits_transcript_to_output() -> Result<(), AppError> {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1077,7 +1075,7 @@ mod tests {
             )),
             transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["hello".to_string()])),
         };
-        let config = test_config();
+        let config = daemon_config();
 
         let shutdown_trigger = Arc::clone(&shutdown);
         let control_thread = thread::spawn(move || {
@@ -1100,7 +1098,7 @@ mod tests {
 
     #[test]
     fn no_speech_timeout_cancels_silent_recording() -> Result<(), AppError> {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1114,7 +1112,7 @@ mod tests {
         let config = DaemonConfig {
             sample_rate: 1_000,
             no_speech_timeout_ms: 30,
-            ..test_config()
+            ..daemon_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1137,7 +1135,7 @@ mod tests {
 
     #[test]
     fn sustained_speech_prevents_no_speech_cancellation() -> Result<(), AppError> {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1151,7 +1149,7 @@ mod tests {
         let config = DaemonConfig {
             sample_rate: 1_000,
             no_speech_timeout_ms: 30,
-            ..test_config()
+            ..daemon_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1181,7 +1179,7 @@ mod tests {
     #[test]
     fn hold_recording_continuous_mode_transcribes_on_pause_before_release() -> Result<(), AppError>
     {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1198,7 +1196,7 @@ mod tests {
             vad: VadMode::Continuous,
             vad_silence_ms: 20,
             vad_chunk_ms: 20,
-            ..test_config()
+            ..daemon_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1223,7 +1221,7 @@ mod tests {
 
     #[test]
     fn continuous_mode_transcribes_long_speech_before_release() -> Result<(), AppError> {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let (transcript_sender, transcript_receiver) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -1250,7 +1248,7 @@ mod tests {
             segment_grace_ms: 20,
             segment_overlap_ms: 5,
             segment_min_ms: 10,
-            ..test_config()
+            ..daemon_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1286,7 +1284,7 @@ mod tests {
 
     #[test]
     fn carried_speech_overlap_is_deduped_on_following_silence_segment() -> Result<(), AppError> {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1309,7 +1307,7 @@ mod tests {
             segment_grace_ms: 200,
             segment_overlap_ms: 10,
             segment_min_ms: 10,
-            ..test_config()
+            ..daemon_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1342,7 +1340,7 @@ mod tests {
 
     #[test]
     fn carried_silence_overlap_does_not_dedupe_following_segment() -> Result<(), AppError> {
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1365,7 +1363,7 @@ mod tests {
             segment_grace_ms: 200,
             segment_overlap_ms: 5,
             segment_min_ms: 10,
-            ..test_config()
+            ..daemon_config()
         };
 
         let shutdown_trigger = Arc::clone(&shutdown);
@@ -1413,7 +1411,7 @@ mod tests {
         fs::create_dir_all(model_path.parent().expect("model parent")).expect("create model dir");
         fs::write(&model_path, b"test model").expect("write model file");
 
-        let (sender, receiver) = control_channel();
+        let (sender, receiver) = mpsc::channel();
         let control_sender = sender.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut output = TestOutput::default();
@@ -1427,7 +1425,7 @@ mod tests {
                 load_count: Arc::new(AtomicUsize::new(0)),
             }),
         };
-        let config = test_config();
+        let config = daemon_config();
 
         let shutdown_trigger = Arc::clone(&shutdown);
         let control_thread = thread::spawn(move || {

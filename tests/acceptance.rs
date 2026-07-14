@@ -23,48 +23,16 @@ use serde_json::Value;
 
 #[cfg(feature = "test-support")]
 use sv::daemon::test_support::{
-    control_channel, TestAudioBackend, TestOutput, TestTranscriberFactory,
+    daemon_config, TestAudioBackend, TestOutput, TestTranscriberFactory,
 };
 #[cfg(feature = "test-support")]
 use sv::daemon::{DaemonConfig, DaemonDeps, DaemonOutput};
 #[cfg(feature = "test-support")]
-use sv::hotkey::HotkeyConfig;
-#[cfg(feature = "test-support")]
 use sv::output::test_support::{RecordedCommand, TestRunner};
 #[cfg(feature = "test-support")]
-use sv::output::{OutputConfig, OutputMode};
+use sv::output::OutputConfig;
 #[cfg(feature = "test-support")]
-use sv::types::{AudioHost, OutputFormat, VadMode};
-
-#[cfg(feature = "test-support")]
-fn daemon_config() -> DaemonConfig {
-    DaemonConfig {
-        model_path: None,
-        download_model: false,
-        language: "en".to_string(),
-        device: None,
-        audio_host: AudioHost::Default,
-        sample_rate: 16_000,
-        format: OutputFormat::Plain,
-        output: OutputConfig {
-            mode: OutputMode::Stdout,
-            ..OutputConfig::default()
-        },
-        vad: VadMode::Off,
-        vad_silence_ms: 800,
-        vad_threshold: 0.015,
-        vad_chunk_ms: 250,
-        segment_target_ms: sv::segmentation::DEFAULT_SEGMENT_TARGET_MS,
-        segment_grace_ms: sv::segmentation::DEFAULT_SEGMENT_GRACE_MS,
-        segment_overlap_ms: sv::segmentation::DEFAULT_SEGMENT_OVERLAP_MS,
-        segment_min_ms: sv::segmentation::DEFAULT_SEGMENT_MIN_MS,
-        debug_audio: false,
-        dump_audio: false,
-        audio_feedback: false,
-        no_speech_timeout_ms: 0,
-        hotkey: HotkeyConfig::default(),
-    }
-}
+use sv::types::{OutputFormat, VadMode};
 
 #[test]
 fn at01_daemon_starts_with_valid_model() -> Result<(), Box<dyn Error>> {
@@ -236,7 +204,7 @@ fn at03_invalid_input_device_returns_exit_code_3() -> Result<(), Box<dyn Error>>
 #[cfg(feature = "test-support")]
 #[test]
 fn at04_daemon_hold_key_captures_and_transcribes() -> Result<(), Box<dyn Error>> {
-    let (sender, receiver) = control_channel();
+    let (sender, receiver) = mpsc::channel();
     let control_sender = sender.clone();
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut output = TestOutput::default();
@@ -270,7 +238,7 @@ fn at04_daemon_hold_key_captures_and_transcribes() -> Result<(), Box<dyn Error>>
 #[cfg(feature = "test-support")]
 #[test]
 fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
-    let (sender, receiver) = control_channel();
+    let (sender, receiver) = mpsc::channel();
     let control_sender = sender.clone();
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut output = TestOutput::default();
@@ -316,7 +284,7 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
 #[cfg(feature = "test-support")]
 #[test]
 fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(), Box<dyn Error>> {
-    let (sender, receiver) = control_channel();
+    let (sender, receiver) = mpsc::channel();
     let control_sender = sender.clone();
     let (transcript_sender, transcript_receiver) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -375,7 +343,7 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
 #[cfg(feature = "test-support")]
 #[test]
 fn at05b_continuous_long_speech_transcribes_before_release() -> Result<(), Box<dyn Error>> {
-    let (sender, receiver) = control_channel();
+    let (sender, receiver) = mpsc::channel();
     let control_sender = sender.clone();
     let (transcript_sender, transcript_receiver) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));

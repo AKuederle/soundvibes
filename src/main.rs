@@ -229,19 +229,33 @@ struct Config {
     hotkey: HotkeyConfig,
 }
 
+struct ConfigSources<'a> {
+    matches: &'a clap::ArgMatches,
+}
+
+impl ConfigSources<'_> {
+    fn value<T>(&self, name: &str, cli: T, file: Option<T>) -> T {
+        if self.matches.value_source(name) == Some(ValueSource::CommandLine) {
+            cli
+        } else {
+            file.unwrap_or(cli)
+        }
+    }
+
+    fn optional<T>(&self, name: &str, cli: Option<T>, file: Option<T>) -> Option<T> {
+        if self.matches.value_source(name) == Some(ValueSource::CommandLine) {
+            cli
+        } else {
+            cli.or(file)
+        }
+    }
+}
+
 impl Config {
     fn from_sources(cli: Cli, matches: &clap::ArgMatches, file: FileConfig) -> Self {
-        let language = if matches.value_source("language") == Some(ValueSource::CommandLine) {
-            cli.language
-        } else {
-            file.language.unwrap_or(cli.language)
-        };
-
-        let model_size = if matches.value_source("model_size") == Some(ValueSource::CommandLine) {
-            cli.model_size
-        } else {
-            file.model_size.unwrap_or(cli.model_size)
-        };
+        let sources = ConfigSources { matches };
+        let language = sources.value("language", cli.language, file.language);
+        let model_size = sources.value("model_size", cli.model_size, file.model_size);
 
         let (model_language, model_language_explicit) =
             if matches.value_source("model_language") == Some(ValueSource::CommandLine) {
@@ -259,196 +273,82 @@ impl Config {
             model_language_for_transcription(&language)
         };
 
-        let device = if matches.value_source("device") == Some(ValueSource::CommandLine) {
-            cli.device
-        } else {
-            cli.device.or(file.device)
-        };
-
-        let audio_host = if matches.value_source("audio_host") == Some(ValueSource::CommandLine) {
-            cli.audio_host
-                .unwrap_or_else(AudioHost::default_for_platform)
-        } else {
-            file.audio_host
-                .or(cli.audio_host)
-                .unwrap_or_else(AudioHost::default_for_platform)
-        };
-
-        let sample_rate = if matches.value_source("sample_rate") == Some(ValueSource::CommandLine) {
-            cli.sample_rate
-        } else {
-            file.sample_rate.unwrap_or(cli.sample_rate)
-        };
-
-        let format = if matches.value_source("format") == Some(ValueSource::CommandLine) {
-            cli.format
-        } else {
-            file.format.unwrap_or(cli.format)
-        };
+        let device = sources.optional("device", cli.device, file.device);
+        let audio_host = sources
+            .optional("audio_host", cli.audio_host, file.audio_host)
+            .unwrap_or_else(AudioHost::default_for_platform);
+        let sample_rate = sources.value("sample_rate", cli.sample_rate, file.sample_rate);
+        let format = sources.value("format", cli.format, file.format);
 
         let output_file = file.output.unwrap_or_default();
-        let mode = if matches.value_source("mode") == Some(ValueSource::CommandLine) {
-            cli.mode
-        } else {
-            output_file.mode.unwrap_or(cli.mode)
-        };
+        let mode = sources.value("mode", cli.mode, output_file.mode);
         let output = OutputConfig {
-            paste_keys: if matches.value_source("paste_keys") == Some(ValueSource::CommandLine) {
-                cli.paste_keys
-            } else {
-                output_file.paste_keys.unwrap_or(cli.paste_keys)
-            },
-            restore_clipboard: if matches.value_source("restore_clipboard")
-                == Some(ValueSource::CommandLine)
-            {
-                cli.restore_clipboard
-            } else {
-                output_file
-                    .restore_clipboard
-                    .unwrap_or(cli.restore_clipboard)
-            },
-            pre_paste_delay_ms: if matches.value_source("pre_paste_delay_ms")
-                == Some(ValueSource::CommandLine)
-            {
-                cli.pre_paste_delay_ms
-            } else {
-                output_file
-                    .pre_paste_delay_ms
-                    .unwrap_or(cli.pre_paste_delay_ms)
-            },
-            restore_clipboard_delay_ms: if matches.value_source("restore_clipboard_delay_ms")
-                == Some(ValueSource::CommandLine)
-            {
-                cli.restore_clipboard_delay_ms
-            } else {
-                output_file
-                    .restore_clipboard_delay_ms
-                    .unwrap_or(cli.restore_clipboard_delay_ms)
-            },
+            paste_keys: sources.value("paste_keys", cli.paste_keys, output_file.paste_keys),
+            restore_clipboard: sources.value(
+                "restore_clipboard",
+                cli.restore_clipboard,
+                output_file.restore_clipboard,
+            ),
+            pre_paste_delay_ms: sources.value(
+                "pre_paste_delay_ms",
+                cli.pre_paste_delay_ms,
+                output_file.pre_paste_delay_ms,
+            ),
+            restore_clipboard_delay_ms: sources.value(
+                "restore_clipboard_delay_ms",
+                cli.restore_clipboard_delay_ms,
+                output_file.restore_clipboard_delay_ms,
+            ),
         };
 
-        let vad = if matches.value_source("vad") == Some(ValueSource::CommandLine) {
-            cli.vad
-        } else {
-            file.vad.map(VadSetting::into_mode).unwrap_or(cli.vad)
-        };
-
+        let vad = sources.value("vad", cli.vad, file.vad.map(VadSetting::into_mode));
         let vad_silence_ms =
-            if matches.value_source("vad_silence_ms") == Some(ValueSource::CommandLine) {
-                cli.vad_silence_ms
-            } else {
-                file.vad_silence_ms.unwrap_or(cli.vad_silence_ms)
-            };
-
-        let vad_threshold =
-            if matches.value_source("vad_threshold") == Some(ValueSource::CommandLine) {
-                cli.vad_threshold
-            } else {
-                file.vad_threshold.unwrap_or(cli.vad_threshold)
-            };
-
-        let vad_chunk_ms = if matches.value_source("vad_chunk_ms") == Some(ValueSource::CommandLine)
-        {
-            cli.vad_chunk_ms
-        } else {
-            file.vad_chunk_ms.unwrap_or(cli.vad_chunk_ms)
-        };
-
-        let segment_target_ms =
-            if matches.value_source("segment_target_ms") == Some(ValueSource::CommandLine) {
-                cli.segment_target_ms
-            } else {
-                file.segment_target_ms.unwrap_or(cli.segment_target_ms)
-            };
-
-        let segment_grace_ms =
-            if matches.value_source("segment_grace_ms") == Some(ValueSource::CommandLine) {
-                cli.segment_grace_ms
-            } else {
-                file.segment_grace_ms.unwrap_or(cli.segment_grace_ms)
-            };
-
-        let segment_overlap_ms =
-            if matches.value_source("segment_overlap_ms") == Some(ValueSource::CommandLine) {
-                cli.segment_overlap_ms
-            } else {
-                file.segment_overlap_ms.unwrap_or(cli.segment_overlap_ms)
-            };
-
+            sources.value("vad_silence_ms", cli.vad_silence_ms, file.vad_silence_ms);
+        let vad_threshold = sources.value("vad_threshold", cli.vad_threshold, file.vad_threshold);
+        let vad_chunk_ms = sources.value("vad_chunk_ms", cli.vad_chunk_ms, file.vad_chunk_ms);
+        let segment_target_ms = sources.value(
+            "segment_target_ms",
+            cli.segment_target_ms,
+            file.segment_target_ms,
+        );
+        let segment_grace_ms = sources.value(
+            "segment_grace_ms",
+            cli.segment_grace_ms,
+            file.segment_grace_ms,
+        );
+        let segment_overlap_ms = sources.value(
+            "segment_overlap_ms",
+            cli.segment_overlap_ms,
+            file.segment_overlap_ms,
+        );
         let segment_min_ms =
-            if matches.value_source("segment_min_ms") == Some(ValueSource::CommandLine) {
-                cli.segment_min_ms
-            } else {
-                file.segment_min_ms.unwrap_or(cli.segment_min_ms)
-            };
-
-        let debug_audio = if matches.value_source("debug_audio") == Some(ValueSource::CommandLine) {
-            cli.debug_audio
-        } else {
-            file.debug_audio.unwrap_or(cli.debug_audio)
-        };
-
-        let debug_vad = if matches.value_source("debug_vad") == Some(ValueSource::CommandLine) {
-            cli.debug_vad
-        } else {
-            file.debug_vad.unwrap_or(cli.debug_vad)
-        };
-
-        let list_devices = if matches.value_source("list_devices") == Some(ValueSource::CommandLine)
-        {
-            cli.list_devices
-        } else {
-            file.list_devices.unwrap_or(cli.list_devices)
-        };
-
-        let dump_audio = if matches.value_source("dump_audio") == Some(ValueSource::CommandLine) {
-            cli.dump_audio
-        } else {
-            file.dump_audio.unwrap_or(cli.dump_audio)
-        };
-
+            sources.value("segment_min_ms", cli.segment_min_ms, file.segment_min_ms);
+        let debug_audio = sources.value("debug_audio", cli.debug_audio, file.debug_audio);
+        let debug_vad = sources.value("debug_vad", cli.debug_vad, file.debug_vad);
+        let list_devices = sources.value("list_devices", cli.list_devices, file.list_devices);
+        let dump_audio = sources.value("dump_audio", cli.dump_audio, file.dump_audio);
         let audio_feedback =
-            if matches.value_source("audio_feedback") == Some(ValueSource::CommandLine) {
-                cli.audio_feedback
-            } else {
-                file.audio_feedback.unwrap_or(cli.audio_feedback)
-            };
-
-        let no_speech_timeout_ms =
-            if matches.value_source("no_speech_timeout_ms") == Some(ValueSource::CommandLine) {
-                cli.no_speech_timeout_ms
-            } else {
-                file.no_speech_timeout_ms
-                    .unwrap_or(cli.no_speech_timeout_ms)
-            };
+            sources.value("audio_feedback", cli.audio_feedback, file.audio_feedback);
+        let no_speech_timeout_ms = sources.value(
+            "no_speech_timeout_ms",
+            cli.no_speech_timeout_ms,
+            file.no_speech_timeout_ms,
+        );
 
         let hotkey_file = file.hotkey.unwrap_or_default();
         let hotkey = HotkeyConfig {
-            enabled: if matches.value_source("hotkey_enabled") == Some(ValueSource::CommandLine) {
-                cli.hotkey_enabled
-            } else {
-                hotkey_file.enabled
-            },
-            key: if matches.value_source("hotkey_key") == Some(ValueSource::CommandLine) {
-                cli.hotkey_key
-            } else {
-                hotkey_file.key
-            },
+            enabled: sources.value(
+                "hotkey_enabled",
+                cli.hotkey_enabled,
+                Some(hotkey_file.enabled),
+            ),
+            key: sources.optional("hotkey_key", cli.hotkey_key, hotkey_file.key),
         };
 
         let download_model =
-            if matches.value_source("download_model") == Some(ValueSource::CommandLine) {
-                cli.download_model
-            } else {
-                file.download_model.unwrap_or(cli.download_model)
-            };
-
+            sources.value("download_model", cli.download_model, file.download_model);
         let file_model_path = file.model_path.or(file.model);
-        let model_path = if matches.value_source("model") == Some(ValueSource::CommandLine) {
-            cli.model
-        } else {
-            cli.model.or(file_model_path)
-        };
+        let model_path = sources.optional("model", cli.model, file_model_path);
 
         Self {
             model_path,

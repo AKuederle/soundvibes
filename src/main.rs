@@ -210,7 +210,6 @@ struct Config {
     audio_host: AudioHost,
     sample_rate: u32,
     format: OutputFormat,
-    mode: OutputMode,
     output: OutputConfig,
     vad: VadMode,
     vad_silence_ms: u64,
@@ -281,23 +280,23 @@ impl Config {
         let format = sources.value("format", cli.format, file.format);
 
         let output_file = file.output.unwrap_or_default();
-        let mode = sources.value("mode", cli.mode, output_file.mode);
         let output = OutputConfig {
-            paste_keys: sources.value("paste_keys", cli.paste_keys, output_file.paste_keys),
+            mode: sources.value("mode", cli.mode, Some(output_file.mode)),
+            paste_keys: sources.value("paste_keys", cli.paste_keys, Some(output_file.paste_keys)),
             restore_clipboard: sources.value(
                 "restore_clipboard",
                 cli.restore_clipboard,
-                output_file.restore_clipboard,
+                Some(output_file.restore_clipboard),
             ),
             pre_paste_delay_ms: sources.value(
                 "pre_paste_delay_ms",
                 cli.pre_paste_delay_ms,
-                output_file.pre_paste_delay_ms,
+                Some(output_file.pre_paste_delay_ms),
             ),
             restore_clipboard_delay_ms: sources.value(
                 "restore_clipboard_delay_ms",
                 cli.restore_clipboard_delay_ms,
-                output_file.restore_clipboard_delay_ms,
+                Some(output_file.restore_clipboard_delay_ms),
             ),
         };
 
@@ -360,7 +359,6 @@ impl Config {
             audio_host,
             sample_rate,
             format,
-            mode,
             output,
             vad,
             vad_silence_ms,
@@ -394,7 +392,7 @@ struct FileConfig {
     audio_host: Option<AudioHost>,
     sample_rate: Option<u32>,
     format: Option<OutputFormat>,
-    output: Option<FileOutputConfig>,
+    output: Option<OutputConfig>,
     vad: Option<VadSetting>,
     vad_silence_ms: Option<u64>,
     vad_threshold: Option<f32>,
@@ -410,16 +408,6 @@ struct FileConfig {
     audio_feedback: Option<bool>,
     no_speech_timeout_ms: Option<u64>,
     hotkey: Option<HotkeyConfig>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct FileOutputConfig {
-    mode: Option<OutputMode>,
-    paste_keys: Option<String>,
-    restore_clipboard: Option<bool>,
-    pre_paste_delay_ms: Option<u64>,
-    restore_clipboard_delay_ms: Option<u64>,
 }
 
 fn main() {
@@ -485,7 +473,7 @@ fn main() {
     println!("Language: {}", config.language);
     println!("Sample rate: {} Hz", config.sample_rate);
     println!("Format: {:?}", config.format);
-    println!("Mode: {:?}", config.mode);
+    println!("Mode: {:?}", config.output.mode);
     println!("VAD: {:?}", config.vad);
     println!("VAD silence timeout: {} ms", config.vad_silence_ms);
     println!("VAD threshold: {:.4}", config.vad_threshold);
@@ -516,7 +504,6 @@ fn main() {
             audio_host: config.audio_host,
             sample_rate: config.sample_rate,
             format: config.format,
-            mode: config.mode,
             output: config.output.clone(),
             vad: config.vad,
             vad_silence_ms: config.vad_silence_ms,
@@ -837,7 +824,7 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
         let config = Config::from_sources(cli, &matches, FileConfig::default());
 
-        assert_eq!(config.mode, OutputMode::Paste);
+        assert_eq!(config.output.mode, OutputMode::Paste);
         assert!(config.output.restore_clipboard);
         assert_eq!(config.output.paste_keys, "ctrl+v");
         assert_eq!(config.output.pre_paste_delay_ms, 100);
@@ -887,7 +874,7 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
         let config = Config::from_sources(cli, &matches, file);
 
-        assert_eq!(config.mode, OutputMode::Clipboard);
+        assert_eq!(config.output.mode, OutputMode::Clipboard);
         assert_eq!(config.output.paste_keys, "ctrl+shift+v");
         assert!(!config.output.restore_clipboard);
         assert_eq!(config.output.pre_paste_delay_ms, 150);

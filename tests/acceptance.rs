@@ -227,8 +227,10 @@ fn at04_daemon_hold_key_captures_and_transcribes() -> Result<(), Box<dyn Error>>
         audio_host: AudioHost::Default,
         sample_rate: 16_000,
         format: OutputFormat::Plain,
-        mode: OutputMode::Stdout,
-        output: OutputConfig::default(),
+        output: OutputConfig {
+            mode: OutputMode::Stdout,
+            ..OutputConfig::default()
+        },
         vad: VadMode::Off,
         vad_silence_ms: 800,
         vad_threshold: 0.015,
@@ -285,8 +287,10 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
         audio_host: AudioHost::Default,
         sample_rate: 16_000,
         format: OutputFormat::Jsonl,
-        mode: OutputMode::Stdout,
-        output: OutputConfig::default(),
+        output: OutputConfig {
+            mode: OutputMode::Stdout,
+            ..OutputConfig::default()
+        },
         vad: VadMode::Off,
         vad_silence_ms: 800,
         vad_threshold: 0.015,
@@ -357,8 +361,10 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
         audio_host: AudioHost::Default,
         sample_rate: 16_000,
         format: OutputFormat::Plain,
-        mode: OutputMode::Stdout,
-        output: OutputConfig::default(),
+        output: OutputConfig {
+            mode: OutputMode::Stdout,
+            ..OutputConfig::default()
+        },
         vad: VadMode::Continuous,
         vad_silence_ms: 20,
         vad_threshold: 0.015,
@@ -434,8 +440,10 @@ fn at05b_continuous_long_speech_transcribes_before_release() -> Result<(), Box<d
         audio_host: AudioHost::Default,
         sample_rate: 1_000,
         format: OutputFormat::Plain,
-        mode: OutputMode::Stdout,
-        output: OutputConfig::default(),
+        output: OutputConfig {
+            mode: OutputMode::Stdout,
+            ..OutputConfig::default()
+        },
         vad: VadMode::Continuous,
         vad_silence_ms: 100,
         vad_threshold: 0.015,
@@ -685,12 +693,7 @@ fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn
     runner.push_status(0);
     runner.push_status(0);
 
-    sv::output::output_text_with_runner(
-        "new text",
-        OutputMode::Paste,
-        &OutputConfig::default(),
-        &mut runner,
-    )?;
+    sv::output::output_text_with_runner("new text", &OutputConfig::default(), &mut runner)?;
 
     assert_eq!(runner.commands.len(), 5);
     assert_command(&runner.commands[0], "wl-paste", &["--list-types"], b"");

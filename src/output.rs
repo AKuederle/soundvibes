@@ -22,6 +22,7 @@ pub enum OutputMode {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct OutputConfig {
+    pub mode: OutputMode,
     pub paste_keys: String,
     pub restore_clipboard: bool,
     pub pre_paste_delay_ms: u64,
@@ -31,6 +32,7 @@ pub struct OutputConfig {
 impl Default for OutputConfig {
     fn default() -> Self {
         Self {
+            mode: OutputMode::Paste,
             paste_keys: "ctrl+v".to_string(),
             restore_clipboard: true,
             pre_paste_delay_ms: 100,
@@ -144,14 +146,13 @@ impl CommandRunner for SystemRunner {
     }
 }
 
-pub fn output_text(text: &str, mode: OutputMode, config: &OutputConfig) -> Result<(), OutputError> {
+pub fn output_text(text: &str, config: &OutputConfig) -> Result<(), OutputError> {
     let mut runner = SystemRunner;
-    output_text_with_runner(text, mode, config, &mut runner)
+    output_text_with_runner(text, config, &mut runner)
 }
 
 pub fn output_text_with_runner(
     text: &str,
-    mode: OutputMode,
     config: &OutputConfig,
     runner: &mut dyn CommandRunner,
 ) -> Result<(), OutputError> {
@@ -159,7 +160,7 @@ pub fn output_text_with_runner(
         return Ok(());
     }
 
-    match mode {
+    match config.mode {
         OutputMode::Stdout => Ok(()),
         OutputMode::Paste => paste_text(text, config, runner),
         OutputMode::Clipboard => copy_plain_text(text, runner),
@@ -172,16 +173,16 @@ fn paste_text(
     config: &OutputConfig,
     runner: &mut dyn CommandRunner,
 ) -> Result<(), OutputError> {
-    ParsedPasteKey::parse(&config.paste_keys)?;
+    let paste_key = ParsedPasteKey::parse(&config.paste_keys)?;
     let original = if config.restore_clipboard {
         read_clipboard_snapshot(runner)?
     } else {
         None
     };
     let paste_result = (|| {
-        copy_temporary_text(text, runner)?;
+        runner.copy_temporary_text(text)?;
         runner.sleep(Duration::from_millis(config.pre_paste_delay_ms));
-        send_paste_key(config, runner)
+        send_paste_key_dotool(&paste_key, runner)
     })();
 
     if config.restore_clipboard {
@@ -280,10 +281,6 @@ fn restore_clipboard_snapshot(
     }
 }
 
-fn copy_temporary_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputError> {
-    runner.copy_temporary_text(text)
-}
-
 fn copy_plain_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputError> {
     let args = vec!["--type".to_string(), "text/plain".to_string()];
     let status = runner
@@ -339,14 +336,6 @@ fn dotool_type_script(text: &str) -> String {
     }
     lines.push(String::new());
     lines.join("\n")
-}
-
-fn send_paste_key(
-    config: &OutputConfig,
-    runner: &mut dyn CommandRunner,
-) -> Result<(), OutputError> {
-    let key = ParsedPasteKey::parse(&config.paste_keys)?;
-    send_paste_key_dotool(&key, runner)
 }
 
 fn send_paste_key_dotool(
@@ -550,13 +539,8 @@ mod tests {
         runner.push_output(b"");
         runner.push_status_success();
 
-        output_text_with_runner(
-            "new text",
-            OutputMode::Paste,
-            &OutputConfig::default(),
-            &mut runner,
-        )
-        .expect("paste should succeed");
+        output_text_with_runner("new text", &OutputConfig::default(), &mut runner)
+            .expect("paste should succeed");
 
         let clear = runner.commands.last().expect("clear command");
         assert_eq!(clear.program, "wl-copy");
@@ -572,7 +556,7 @@ mod tests {
             ..OutputConfig::default()
         };
 
-        let err = output_text_with_runner("new text", OutputMode::Paste, &config, &mut runner)
+        let err = output_text_with_runner("new text", &config, &mut runner)
             .expect_err("invalid paste key should fail");
 
         assert!(err.to_string().contains("paste_keys has invalid format"));
@@ -593,13 +577,8 @@ mod tests {
             .push(std::process::ExitStatus::from_raw(1 << 8));
         runner.push_status_success();
 
-        let err = output_text_with_runner(
-            "new text",
-            OutputMode::Paste,
-            &OutputConfig::default(),
-            &mut runner,
-        )
-        .expect_err("paste key failure should be reported");
+        let err = output_text_with_runner("new text", &OutputConfig::default(), &mut runner)
+            .expect_err("paste key failure should be reported");
 
         assert!(err.to_string().contains("dotool paste key exited"));
         let restore = runner.commands.last().expect("restore command");
@@ -618,13 +597,8 @@ mod tests {
         runner.push_output(b"");
         runner.push_status_success();
 
-        output_text_with_runner(
-            "new text",
-            OutputMode::Paste,
-            &OutputConfig::default(),
-            &mut runner,
-        )
-        .expect("paste should succeed");
+        output_text_with_runner("new text", &OutputConfig::default(), &mut runner)
+            .expect("paste should succeed");
 
         assert_eq!(runner.commands[0].program, "wl-paste");
         assert_eq!(runner.commands[0].args, ["--list-types"]);
@@ -654,14 +628,13 @@ mod tests {
     fn type_mode_uses_dotool_without_wtype_fallback() {
         let mut runner = FakeRunner::default();
         runner.push_status_success();
+        let config = OutputConfig {
+            mode: OutputMode::Type,
+            ..OutputConfig::default()
+        };
 
-        output_text_with_runner(
-            "typed text",
-            OutputMode::Type,
-            &OutputConfig::default(),
-            &mut runner,
-        )
-        .expect("type output should succeed");
+        output_text_with_runner("typed text", &config, &mut runner)
+            .expect("type output should succeed");
 
         assert_eq!(runner.commands.len(), 1);
         assert_eq!(runner.commands[0].program, "dotool");
@@ -676,14 +649,13 @@ mod tests {
     fn type_mode_splits_multiline_text_into_safe_dotool_commands() {
         let mut runner = FakeRunner::default();
         runner.push_status_success();
+        let config = OutputConfig {
+            mode: OutputMode::Type,
+            ..OutputConfig::default()
+        };
 
-        output_text_with_runner(
-            "first\nkey leftctrl+v\nthird",
-            OutputMode::Type,
-            &OutputConfig::default(),
-            &mut runner,
-        )
-        .expect("type output should succeed");
+        output_text_with_runner("first\nkey leftctrl+v\nthird", &config, &mut runner)
+            .expect("type output should succeed");
 
         assert_eq!(
             String::from_utf8_lossy(&runner.commands[0].stdin),

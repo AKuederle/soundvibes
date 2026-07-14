@@ -35,7 +35,6 @@ pub struct DaemonConfig {
     pub audio_host: AudioHost,
     pub sample_rate: u32,
     pub format: OutputFormat,
-    pub mode: OutputMode,
     pub output: OutputConfig,
     pub vad: VadMode,
     pub vad_silence_ms: u64,
@@ -624,19 +623,19 @@ fn emit_transcript(
     text: &str,
     info: audio::SegmentInfo,
 ) -> Result<(), String> {
-    match config.mode {
+    match config.output.mode {
         OutputMode::Stdout => emit_stdout(config.format, output, text, info),
         OutputMode::Clipboard => {
-            if let Err(err) = output::output_text(text, OutputMode::Clipboard, &config.output) {
+            if let Err(err) = output::output_text(text, &config.output) {
                 output.stderr(&format!("warn: {err}; falling back to stdout"));
                 emit_stdout(config.format, output, text, info)
             } else {
                 Ok(())
             }
         }
-        mode @ (OutputMode::Paste | OutputMode::Type) => {
+        OutputMode::Paste | OutputMode::Type => {
             let insertion_text = segmentation::append_segment_space(text);
-            if let Err(err) = output::output_text(&insertion_text, mode, &config.output) {
+            if let Err(err) = output::output_text(&insertion_text, &config.output) {
                 output.stderr(&format!("warn: {err}; falling back to stdout"));
                 emit_stdout(config.format, output, text, info)
             } else {
@@ -1140,8 +1139,10 @@ mod tests {
             audio_host: AudioHost::Default,
             sample_rate: 16_000,
             format: OutputFormat::Plain,
-            mode: OutputMode::Stdout,
-            output: OutputConfig::default(),
+            output: OutputConfig {
+                mode: OutputMode::Stdout,
+                ..OutputConfig::default()
+            },
             vad: VadMode::Off,
             vad_silence_ms: 800,
             vad_threshold: 0.015,

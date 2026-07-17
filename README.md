@@ -41,6 +41,17 @@ paste_keys = "ctrl+v"
 
 Keep root settings before `[output]` and `[hotkey]`; TOML keys following a table header belong to that table.
 
+### Universal paste on Linux desktops
+
+Most graphical applications accept `Shift+Insert` as a clipboard paste shortcut. Konsole supports it by default, while Ghostty needs an explicit binding so it uses the regular clipboard instead of the selection clipboard. Configure SoundVibes and Ghostty together with:
+
+```bash
+contrib/setup-universal-paste
+systemctl --user restart sv.service
+```
+
+The setup script preserves existing settings and is safe to run repeatedly. Reload Ghostty with `Ctrl+Shift+,` or restart it after running the script.
+
 ## Run
 
 ```bash

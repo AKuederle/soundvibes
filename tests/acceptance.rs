@@ -636,6 +636,116 @@ fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn
     Ok(())
 }
 
+#[test]
+fn at13_universal_paste_setup_configures_soundvibes_and_ghostty() -> Result<(), Box<dyn Error>> {
+    let config_home = temp_dir("soundvibes-universal-paste-config");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("contrib")
+        .join("setup-universal-paste");
+
+    let output = Command::new("sh")
+        .arg(&script)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "setup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(config_home.join("soundvibes/config.toml"))?,
+        "[output]\npaste_keys = \"shift+insert\"\n"
+    );
+    assert_eq!(
+        fs::read_to_string(config_home.join("ghostty/config"))?,
+        "keybind = shift+insert=paste_from_clipboard\n"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Konsole already supports Shift+Insert"),
+        "expected Konsole compatibility message"
+    );
+    Ok(())
+}
+
+#[test]
+fn at13_universal_paste_setup_preserves_existing_config_and_is_idempotent(
+) -> Result<(), Box<dyn Error>> {
+    let config_home = temp_dir("soundvibes-universal-paste-existing-config");
+    let soundvibes_config = config_home.join("soundvibes/config.toml");
+    let ghostty_config = config_home.join("ghostty/config");
+    fs::create_dir_all(
+        soundvibes_config
+            .parent()
+            .expect("soundvibes config parent"),
+    )?;
+    fs::create_dir_all(ghostty_config.parent().expect("ghostty config parent"))?;
+    fs::write(
+        &soundvibes_config,
+        "language = \"de\"\n\n[output]\nrestore_clipboard = false\npaste_keys = \"ctrl+v\"\n\n[hotkey]\nenabled = true\n",
+    )?;
+    fs::write(
+        &ghostty_config,
+        "font-size = 12\nkeybind = shift+insert=paste_from_selection\n",
+    )?;
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("contrib")
+        .join("setup-universal-paste");
+
+    for _ in 0..2 {
+        let status = Command::new("sh")
+            .arg(&script)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .status()?;
+        assert!(status.success(), "setup should succeed repeatedly");
+    }
+
+    assert_eq!(
+        fs::read_to_string(soundvibes_config)?,
+        "language = \"de\"\n\n[output]\nrestore_clipboard = false\npaste_keys = \"shift+insert\"\n\n[hotkey]\nenabled = true\n"
+    );
+    assert_eq!(
+        fs::read_to_string(ghostty_config)?,
+        "font-size = 12\nkeybind = shift+insert=paste_from_clipboard\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn at13_universal_paste_setup_handles_commented_output_table() -> Result<(), Box<dyn Error>> {
+    let config_home = temp_dir("soundvibes-universal-paste-commented-config");
+    let soundvibes_config = config_home.join("soundvibes/config.toml");
+    fs::create_dir_all(
+        soundvibes_config
+            .parent()
+            .expect("soundvibes config parent"),
+    )?;
+    fs::write(
+        &soundvibes_config,
+        "[output] # Dictation output\nrestore_clipboard = true\n\n[hotkey]\nenabled = true\n",
+    )?;
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("contrib")
+        .join("setup-universal-paste");
+
+    let status = Command::new("sh")
+        .arg(&script)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .status()?;
+
+    assert!(status.success(), "setup should accept TOML table comments");
+    let configured = fs::read_to_string(soundvibes_config)?;
+    let parsed: toml::Value = toml::from_str(&configured)?;
+    assert_eq!(
+        parsed["output"]["paste_keys"].as_str(),
+        Some("shift+insert")
+    );
+    assert_eq!(parsed["output"]["restore_clipboard"].as_bool(), Some(true));
+    assert_eq!(parsed["hotkey"]["enabled"].as_bool(), Some(true));
+    assert_eq!(configured.matches("[output]").count(), 1);
+    Ok(())
+}
+
 #[cfg(feature = "test-support")]
 #[test]
 fn at12_daemon_status_is_acknowledged() -> Result<(), Box<dyn Error>> {

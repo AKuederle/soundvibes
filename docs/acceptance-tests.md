@@ -116,3 +116,9 @@ These tests validate the product behavior for the offline Linux CLI.
 - Command: request `status`, request a missing model reload, then request `stop`.
 - Expect: status returns versioned JSON with `state = "idle"` and `language = "en"`; model reload returns its processing error; stop returns success.
 - Pass: each client receives the daemon loop's response rather than inferring success from the socket write.
+
+### AT-13: Universal paste setup
+- Setup: use an empty temporary `<config-home>`.
+- Command: run `contrib/setup-universal-paste`.
+- Expect: Soundvibes uses `Shift+Insert`, Ghostty maps it to the regular clipboard, and the script notes that Konsole supports it by default.
+- Pass: both configuration files contain the expected bindings without requiring a live graphical session.

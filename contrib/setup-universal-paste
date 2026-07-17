@@ -1,0 +1,70 @@
+#!/bin/sh
+
+set -eu
+
+config_home=${XDG_CONFIG_HOME:-"${HOME}/.config"}
+soundvibes_config="${config_home}/soundvibes/config.toml"
+ghostty_config="${config_home}/ghostty/config"
+
+mkdir -p "$(dirname "$soundvibes_config")" "$(dirname "$ghostty_config")"
+
+if [ ! -e "$soundvibes_config" ]; then
+    printf '%s\n' '[output]' 'paste_keys = "shift+insert"' >"$soundvibes_config"
+else
+    soundvibes_tmp=$(mktemp "${soundvibes_config}.tmp.XXXXXX")
+    awk '
+        BEGIN { section = ""; found_output = 0; configured = 0 }
+        /^[[:space:]]*\[[^]]+\][[:space:]]*(#.*)?$/ {
+            if (section == "output" && !configured) {
+                print "paste_keys = \"shift+insert\""
+                configured = 1
+            }
+            section = $0
+            sub(/[[:space:]]*#.*/, "", section)
+            gsub(/^[[:space:]]*\[|\][[:space:]]*$/, "", section)
+            if (section == "output") found_output = 1
+            print
+            next
+        }
+        section == "output" && /^[[:space:]]*paste_keys[[:space:]]*=/ {
+            if (!configured) print "paste_keys = \"shift+insert\""
+            configured = 1
+            next
+        }
+        { print }
+        END {
+            if (!found_output) {
+                if (NR > 0) print ""
+                print "[output]"
+                print "paste_keys = \"shift+insert\""
+            } else if (section == "output" && !configured) {
+                print "paste_keys = \"shift+insert\""
+            }
+        }
+    ' "$soundvibes_config" >"$soundvibes_tmp"
+    chmod --reference="$soundvibes_config" "$soundvibes_tmp"
+    mv "$soundvibes_tmp" "$soundvibes_config"
+fi
+
+if [ ! -e "$ghostty_config" ]; then
+    printf '%s\n' 'keybind = shift+insert=paste_from_clipboard' >"$ghostty_config"
+else
+    ghostty_tmp=$(mktemp "${ghostty_config}.tmp.XXXXXX")
+    awk '
+        BEGIN { configured = 0 }
+        /^[[:space:]]*keybind[[:space:]]*=[[:space:]]*shift\+insert[[:space:]]*=/ {
+            if (!configured) print "keybind = shift+insert=paste_from_clipboard"
+            configured = 1
+            next
+        }
+        { print }
+        END {
+            if (!configured) print "keybind = shift+insert=paste_from_clipboard"
+        }
+    ' "$ghostty_config" >"$ghostty_tmp"
+    chmod --reference="$ghostty_config" "$ghostty_tmp"
+    mv "$ghostty_tmp" "$ghostty_config"
+fi
+
+printf '%s\n' 'Configured Soundvibes and Ghostty to paste with Shift+Insert.'
+printf '%s\n' 'Konsole already supports Shift+Insert with the regular clipboard; no override is needed.'

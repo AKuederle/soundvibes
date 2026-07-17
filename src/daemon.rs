@@ -675,7 +675,7 @@ fn emit_transcript(
                 emit_stdout(config.format, output, text, info)
             }
         }
-        OutputMode::Paste | OutputMode::Type => {
+        OutputMode::Paste | OutputMode::Type | OutputMode::Ydotool => {
             let insertion_text = segmentation::append_segment_space(text);
             if let Err(err) = output::output_text(&insertion_text, &config.output) {
                 output.stderr(&format!("warn: {err}; falling back to stdout"));

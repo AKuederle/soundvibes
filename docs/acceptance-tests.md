@@ -122,3 +122,10 @@ These tests validate the product behavior for the offline Linux CLI.
 - Command: run `contrib/setup-universal-paste`.
 - Expect: Soundvibes uses `Shift+Insert`, Ghostty maps it to the regular clipboard, and the script notes that Konsole supports it by default.
 - Pass: both configuration files contain the expected bindings without requiring a live graphical session.
+
+### AT-14: Zero-delay ydotool output
+- Setup: install and start the per-user `ydotoold` service.
+- Command: start Soundvibes with `[output] mode = "ydotool"`.
+- Action: dictate text into a focused graphical text field.
+- Expect: Soundvibes sends the transcript through the existing daemon with zero key delay and zero key hold, without using the KDE-incompatible `wtype` path or the slower `dotool` fallback.
+- Pass: automated test-support verifies the exact daemon-client command and stdin payload; a hardware acceptance run verifies that a focused application receives the complete text.

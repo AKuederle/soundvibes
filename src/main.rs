@@ -857,6 +857,32 @@ mod tests {
     }
 
     #[test]
+    fn selects_ydotool_output_from_config_or_cli() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [output]
+            mode = "ydotool"
+            "#,
+        )
+        .expect("config should parse");
+        let command = Cli::command();
+        let matches = command
+            .try_get_matches_from(["sv", "daemon", "start"])
+            .expect("failed to parse cli");
+        let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
+        let config = Config::from_sources(cli, &matches, file);
+        assert_eq!(config.daemon.output.mode, OutputMode::Ydotool);
+
+        let command = Cli::command();
+        let matches = command
+            .try_get_matches_from(["sv", "daemon", "start", "--mode", "ydotool"])
+            .expect("failed to parse ydotool CLI mode");
+        let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
+        let config = Config::from_sources(cli, &matches, FileConfig::default());
+        assert_eq!(config.daemon.output.mode, OutputMode::Ydotool);
+    }
+
+    #[test]
     fn reads_segment_config_with_cli_overrides() {
         let file: FileConfig = toml::from_str(
             r#"

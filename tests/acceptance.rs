@@ -748,6 +748,28 @@ fn at13_universal_paste_setup_handles_commented_output_table() -> Result<(), Box
 
 #[cfg(feature = "test-support")]
 #[test]
+fn at14_ydotool_mode_uses_zero_delay_daemon_client() -> Result<(), Box<dyn Error>> {
+    let mut runner = TestRunner::default();
+    runner.push_status(0);
+    let config = OutputConfig {
+        mode: sv::output::OutputMode::Ydotool,
+        ..OutputConfig::default()
+    };
+
+    sv::output::output_text_with_runner("fast text", &config, &mut runner)?;
+
+    assert_eq!(runner.commands.len(), 1);
+    assert_command(
+        &runner.commands[0],
+        "ydotool",
+        &["type", "--key-delay", "0", "--key-hold", "0", "--file", "-"],
+        b"fast text",
+    );
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+#[test]
 fn at12_daemon_status_is_acknowledged() -> Result<(), Box<dyn Error>> {
     let runtime_dir = temp_dir("soundvibes-acceptance-runtime");
     fs::create_dir_all(&runtime_dir)?;

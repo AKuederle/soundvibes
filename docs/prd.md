@@ -59,7 +59,7 @@ This PRD is a living document and should be updated as product requirements and 
 - Inference: whisper.cpp via Rust FFI bindings, using quantized small models with GPU acceleration when available.
 - Output: final text output to stdout after transcription completes.
 - Control plane: daemon listens for evdev key events and keeps a local socket for lifecycle commands.
-- Text output: Wayland clipboard access through `wl-clipboard` and key input through `dotool`.
+- Text output: Wayland clipboard access through `wl-clipboard`, key input through `dotool`, and an explicit zero-delay `ydotoold` mode.
 
 ## Model Choice
 - Engine: whisper.cpp (FFI) for best accuracy-to-size tradeoff.

@@ -52,6 +52,19 @@ systemctl --user restart sv.service
 
 The setup script preserves existing settings and is safe to run repeatedly. Reload Ghostty with `Ctrl+Shift+,` or restart it after running the script.
 
+To bypass the clipboard and type through the persistent `ydotoold` virtual keyboard instead, install and enable its user service, then change the output mode:
+
+```bash
+systemctl --user enable --now ydotool
+```
+
+```toml
+[output]
+mode = "ydotool"
+```
+
+Switch `mode` back to `"paste"` to restore clipboard paste. The ydotool backend uses zero key delay and zero key hold. It is very fast, but unlike clipboard paste it follows the active keyboard layout and has limited Unicode support.
+
 ## Run
 
 ```bash
@@ -75,9 +88,10 @@ Output modes:
 - `paste` (default): temporarily copies text, pastes with `dotool`, then restores the clipboard.
 - `clipboard`: leaves the transcript on the clipboard.
 - `type`: types text directly with `dotool`.
+- `ydotool`: types with zero delay through the existing `ydotoold` user service.
 - `stdout`: prints transcripts in the daemon terminal.
 
-Paste and clipboard modes require `wl-clipboard`; automatic paste and type modes require `dotool` plus `/dev/uinput` access.
+Paste and clipboard modes require `wl-clipboard`; automatic paste and type modes require `dotool` plus `/dev/uinput` access. Ydotool mode requires the `ydotool` client and a running `ydotoold` user service.
 
 To run as a user service after `cargo install`, copy the supplied unit:
 

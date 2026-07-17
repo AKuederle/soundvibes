@@ -17,6 +17,7 @@ pub enum OutputMode {
     Paste,
     Clipboard,
     Type,
+    Ydotool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -161,6 +162,7 @@ pub fn output_text_with_runner(
         OutputMode::Paste => paste_text(text, config, runner),
         OutputMode::Clipboard => copy_plain_text(text, runner),
         OutputMode::Type => type_text(text, runner),
+        OutputMode::Ydotool => type_text_ydotool(text, runner),
     }
 }
 
@@ -283,6 +285,34 @@ fn copy_plain_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), Out
 
 fn type_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputError> {
     run_dotool(&dotool_type_script(text), "typing", runner)
+}
+
+fn type_text_ydotool(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputError> {
+    let args = vec![
+        "type".to_string(),
+        "--key-delay".to_string(),
+        "0".to_string(),
+        "--key-hold".to_string(),
+        "0".to_string(),
+        "--file".to_string(),
+        "-".to_string(),
+    ];
+    let status = runner
+        .status_with_stdin("ydotool", &args, text.as_bytes())
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                OutputError::new("ydotool not found; install ydotool and enable ydotoold")
+            } else {
+                OutputError::new(format!("failed to run ydotool: {err}"))
+            }
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(OutputError::new(format!(
+            "ydotool typing exited with status {status}; ensure ydotoold is running"
+        )))
+    }
 }
 
 fn run_dotool(
@@ -618,6 +648,42 @@ mod tests {
             String::from_utf8_lossy(&runner.commands[0].stdin),
             "type typed text\n"
         );
+    }
+
+    #[test]
+    fn ydotool_mode_uses_the_persistent_daemon_with_zero_delay() {
+        let mut runner = TestRunner::default();
+        runner.push_status(0);
+        let config = OutputConfig {
+            mode: OutputMode::Ydotool,
+            ..OutputConfig::default()
+        };
+
+        output_text_with_runner("typed text", &config, &mut runner)
+            .expect("ydotool output should succeed");
+
+        assert_eq!(runner.commands.len(), 1);
+        assert_eq!(runner.commands[0].program, "ydotool");
+        assert_eq!(
+            runner.commands[0].args,
+            ["type", "--key-delay", "0", "--key-hold", "0", "--file", "-",]
+        );
+        assert_eq!(runner.commands[0].stdin, b"typed text");
+    }
+
+    #[test]
+    fn ydotool_mode_reports_when_the_daemon_client_fails() {
+        let mut runner = TestRunner::default();
+        runner.push_status(1);
+        let config = OutputConfig {
+            mode: OutputMode::Ydotool,
+            ..OutputConfig::default()
+        };
+
+        let err = output_text_with_runner("typed text", &config, &mut runner)
+            .expect_err("ydotool failure should be reported");
+
+        assert!(err.to_string().contains("ensure ydotoold is running"));
     }
 
     #[test]

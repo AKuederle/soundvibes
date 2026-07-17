@@ -1,0 +1,16 @@
+#!/bin/sh
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+source_config="${script_dir}/keyd-soundvibes.conf"
+target_config=/etc/keyd/soundvibes.conf
+
+keyd check "$source_config" >/dev/null
+install -Dm 0644 "$source_config" "$target_config"
+systemctl enable keyd.service
+if systemctl is-active keyd.service >/dev/null 2>&1; then
+    keyd reload
+else
+    systemctl start keyd.service
+fi

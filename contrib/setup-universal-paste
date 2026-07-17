@@ -3,48 +3,66 @@
 set -eu
 
 config_home=${XDG_CONFIG_HOME:-"${HOME}/.config"}
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 soundvibes_config="${config_home}/soundvibes/config.toml"
 ghostty_config="${config_home}/ghostty/config"
+keyd_config_dir=${KEYD_CONFIG_DIR:-/etc/keyd}
+keyd_config="${keyd_config_dir}/soundvibes.conf"
+keyd_source="${script_dir}/keyd-soundvibes.conf"
+keyd_activator="${script_dir}/activate-keyd-hotkey"
+keyd_command=${KEYD_COMMAND:-keyd}
+privilege_tool=${KEYD_PRIVILEGE_TOOL:-sudo}
 
 mkdir -p "$(dirname "$soundvibes_config")" "$(dirname "$ghostty_config")"
 
-if [ ! -e "$soundvibes_config" ]; then
-    printf '%s\n' '[output]' 'paste_keys = "shift+insert"' >"$soundvibes_config"
-else
-    soundvibes_tmp=$(mktemp "${soundvibes_config}.tmp.XXXXXX")
+upsert_toml_string() {
+    file=$1
+    target_section=$2
+    target_key=$3
+    target_value=$4
+    tmp=$(mktemp "${file}.tmp.XXXXXX")
+
     awk '
-        BEGIN { section = ""; found_output = 0; configured = 0 }
+        BEGIN { section = ""; found_section = 0; configured = 0 }
         /^[[:space:]]*\[[^]]+\][[:space:]]*(#.*)?$/ {
-            if (section == "output" && !configured) {
-                print "paste_keys = \"shift+insert\""
+            if (section == target_section && !configured) {
+                print target_key " = \"" target_value "\""
                 configured = 1
             }
             section = $0
             sub(/[[:space:]]*#.*/, "", section)
             gsub(/^[[:space:]]*\[|\][[:space:]]*$/, "", section)
-            if (section == "output") found_output = 1
+            if (section == target_section) found_section = 1
             print
             next
         }
-        section == "output" && /^[[:space:]]*paste_keys[[:space:]]*=/ {
-            if (!configured) print "paste_keys = \"shift+insert\""
+        section == target_section && $0 ~ "^[[:space:]]*" target_key "[[:space:]]*=" {
+            if (!configured) print target_key " = \"" target_value "\""
             configured = 1
             next
         }
         { print }
         END {
-            if (!found_output) {
+            if (!found_section) {
                 if (NR > 0) print ""
-                print "[output]"
-                print "paste_keys = \"shift+insert\""
-            } else if (section == "output" && !configured) {
-                print "paste_keys = \"shift+insert\""
+                print "[" target_section "]"
+                print target_key " = \"" target_value "\""
+            } else if (section == target_section && !configured) {
+                print target_key " = \"" target_value "\""
             }
         }
-    ' "$soundvibes_config" >"$soundvibes_tmp"
-    chmod --reference="$soundvibes_config" "$soundvibes_tmp"
-    mv "$soundvibes_tmp" "$soundvibes_config"
+    ' target_section="$target_section" target_key="$target_key" target_value="$target_value" \
+        "$file" >"$tmp"
+    chmod --reference="$file" "$tmp"
+    mv "$tmp" "$file"
+}
+
+if [ ! -e "$soundvibes_config" ]; then
+    : >"$soundvibes_config"
 fi
+upsert_toml_string "$soundvibes_config" output paste_keys shift+insert
+upsert_toml_string "$soundvibes_config" output mode ydotool
+upsert_toml_string "$soundvibes_config" hotkey key F24
 
 if [ ! -e "$ghostty_config" ]; then
     printf '%s\n' 'keybind = shift+insert=paste_from_clipboard' >"$ghostty_config"
@@ -66,5 +84,44 @@ else
     mv "$ghostty_tmp" "$ghostty_config"
 fi
 
-printf '%s\n' 'Configured Soundvibes and Ghostty to paste with Shift+Insert.'
+if ! keyd_bin=$(command -v "$keyd_command"); then
+    printf '%s\n' 'keyd is required for the safe Soundvibes hotkey chord.' >&2
+    exit 1
+fi
+
+"$keyd_bin" check "$keyd_source" >/dev/null
+
+if [ -n "${KEYD_CONFIG_DIR+x}" ]; then
+    mkdir -p "$keyd_config_dir"
+    install -m 0644 "$keyd_source" "$keyd_config"
+else
+    if [ "$(id -u)" -eq 0 ]; then
+        "$keyd_activator"
+    elif command -v "$privilege_tool" >/dev/null 2>&1; then
+        if [ "$(basename "$privilege_tool")" = kdesu ]; then
+            "$privilege_tool" -c "$keyd_activator"
+        else
+            "$privilege_tool" "$keyd_activator"
+        fi
+    else
+        printf '%s\n' "root access is required to install $keyd_config; install sudo or set KEYD_PRIVILEGE_TOOL" >&2
+        exit 1
+    fi
+fi
+
+if [ "${SKIP_KEYD_ACTIVATION:-0}" != 1 ]; then
+    if ! command -v ydotool >/dev/null 2>&1; then
+        printf '%s\n' 'ydotool is required for zero-delay transcript insertion.' >&2
+        exit 1
+    fi
+    systemctl --user enable --now ydotool.service
+fi
+
+if [ "${SKIP_SOUNDVIBES_RESTART:-0}" != 1 ] && systemctl --user is-active sv.service >/dev/null 2>&1; then
+    systemctl --user restart sv.service
+fi
+
+printf '%s\n' 'Configured AltGr+Right Ctrl as the F24 Soundvibes trigger through keyd.'
+printf '%s\n' 'Configured Soundvibes to use the zero-delay ydotool backend.'
+printf '%s\n' 'Configured Soundvibes and Ghostty to paste with Shift+Insert as a fallback.'
 printf '%s\n' 'Konsole already supports Shift+Insert with the regular clipboard; no override is needed.'

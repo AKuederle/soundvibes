@@ -117,11 +117,11 @@ These tests validate the product behavior for the offline Linux CLI.
 - Expect: status returns versioned JSON with `state = "idle"` and `language = "en"`; model reload returns its processing error; stop returns success.
 - Pass: each client receives the daemon loop's response rather than inferring success from the socket write.
 
-### AT-13: Universal paste setup
-- Setup: use an empty temporary `<config-home>`.
+### AT-13: Universal paste and safe typing setup
+- Setup: install `keyd` and `ydotool`, then use empty temporary `<config-home>` and keyd configuration directories.
 - Command: run `contrib/setup-universal-paste`.
-- Expect: Soundvibes uses `Shift+Insert`, Ghostty maps it to the regular clipboard, and the script notes that Konsole supports it by default.
-- Pass: both configuration files contain the expected bindings without requiring a live graphical session.
+- Expect: keyd maps the `rightalt+rightcontrol` chord to `F24`; Soundvibes uses `F24` with the zero-delay `ydotool` backend; Ghostty maps `Shift+Insert` to the regular clipboard; and the script notes that Konsole supports the fallback by default.
+- Pass: automated tests verify all three idempotent configuration files without requiring a live graphical session; a hardware run verifies that the chord produces `F24` without forwarded Ctrl or Alt modifiers.
 
 ### AT-14: Zero-delay ydotool output
 - Setup: install and start the per-user `ydotoold` service.

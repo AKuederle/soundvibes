@@ -639,6 +639,7 @@ fn at11_paste_mode_restores_clipboard_with_original_mime() -> Result<(), Box<dyn
 #[test]
 fn at13_universal_paste_setup_configures_soundvibes_and_ghostty() -> Result<(), Box<dyn Error>> {
     let config_home = temp_dir("soundvibes-universal-paste-config");
+    let keyd_config_dir = temp_dir("soundvibes-keyd-config");
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("contrib")
         .join("setup-universal-paste");
@@ -646,6 +647,10 @@ fn at13_universal_paste_setup_configures_soundvibes_and_ghostty() -> Result<(), 
     let output = Command::new("sh")
         .arg(&script)
         .env("XDG_CONFIG_HOME", &config_home)
+        .env("KEYD_CONFIG_DIR", &keyd_config_dir)
+        .env("KEYD_COMMAND", "true")
+        .env("SKIP_KEYD_ACTIVATION", "1")
+        .env("SKIP_SOUNDVIBES_RESTART", "1")
         .output()?;
 
     assert!(
@@ -655,7 +660,7 @@ fn at13_universal_paste_setup_configures_soundvibes_and_ghostty() -> Result<(), 
     );
     assert_eq!(
         fs::read_to_string(config_home.join("soundvibes/config.toml"))?,
-        "[output]\npaste_keys = \"shift+insert\"\n"
+        "[output]\npaste_keys = \"shift+insert\"\nmode = \"ydotool\"\n\n[hotkey]\nkey = \"F24\"\n"
     );
     assert_eq!(
         fs::read_to_string(config_home.join("ghostty/config"))?,
@@ -665,6 +670,10 @@ fn at13_universal_paste_setup_configures_soundvibes_and_ghostty() -> Result<(), 
         String::from_utf8_lossy(&output.stdout).contains("Konsole already supports Shift+Insert"),
         "expected Konsole compatibility message"
     );
+    assert_eq!(
+        fs::read_to_string(keyd_config_dir.join("soundvibes.conf"))?,
+        "[ids]\n*\n\n[main]\nrightalt+rightcontrol = f24\n"
+    );
     Ok(())
 }
 
@@ -672,6 +681,7 @@ fn at13_universal_paste_setup_configures_soundvibes_and_ghostty() -> Result<(), 
 fn at13_universal_paste_setup_preserves_existing_config_and_is_idempotent(
 ) -> Result<(), Box<dyn Error>> {
     let config_home = temp_dir("soundvibes-universal-paste-existing-config");
+    let keyd_config_dir = temp_dir("soundvibes-keyd-existing-config");
     let soundvibes_config = config_home.join("soundvibes/config.toml");
     let ghostty_config = config_home.join("ghostty/config");
     fs::create_dir_all(
@@ -696,17 +706,35 @@ fn at13_universal_paste_setup_preserves_existing_config_and_is_idempotent(
         let status = Command::new("sh")
             .arg(&script)
             .env("XDG_CONFIG_HOME", &config_home)
+            .env("KEYD_CONFIG_DIR", &keyd_config_dir)
+            .env("KEYD_COMMAND", "true")
+            .env("SKIP_KEYD_ACTIVATION", "1")
+            .env("SKIP_SOUNDVIBES_RESTART", "1")
             .status()?;
         assert!(status.success(), "setup should succeed repeatedly");
     }
 
+    let configured = fs::read_to_string(soundvibes_config)?;
+    let parsed: toml::Value = toml::from_str(&configured)?;
+    assert_eq!(parsed["language"].as_str(), Some("de"));
+    assert_eq!(parsed["output"]["restore_clipboard"].as_bool(), Some(false));
     assert_eq!(
-        fs::read_to_string(soundvibes_config)?,
-        "language = \"de\"\n\n[output]\nrestore_clipboard = false\npaste_keys = \"shift+insert\"\n\n[hotkey]\nenabled = true\n"
+        parsed["output"]["paste_keys"].as_str(),
+        Some("shift+insert")
     );
+    assert_eq!(parsed["output"]["mode"].as_str(), Some("ydotool"));
+    assert_eq!(parsed["hotkey"]["enabled"].as_bool(), Some(true));
+    assert_eq!(parsed["hotkey"]["key"].as_str(), Some("F24"));
+    assert_eq!(configured.matches("paste_keys =").count(), 1);
+    assert_eq!(configured.matches("mode =").count(), 1);
+    assert_eq!(configured.matches("key =").count(), 1);
     assert_eq!(
         fs::read_to_string(ghostty_config)?,
         "font-size = 12\nkeybind = shift+insert=paste_from_clipboard\n"
+    );
+    assert_eq!(
+        fs::read_to_string(keyd_config_dir.join("soundvibes.conf"))?,
+        "[ids]\n*\n\n[main]\nrightalt+rightcontrol = f24\n"
     );
     Ok(())
 }
@@ -714,6 +742,7 @@ fn at13_universal_paste_setup_preserves_existing_config_and_is_idempotent(
 #[test]
 fn at13_universal_paste_setup_handles_commented_output_table() -> Result<(), Box<dyn Error>> {
     let config_home = temp_dir("soundvibes-universal-paste-commented-config");
+    let keyd_config_dir = temp_dir("soundvibes-keyd-commented-config");
     let soundvibes_config = config_home.join("soundvibes/config.toml");
     fs::create_dir_all(
         soundvibes_config
@@ -731,6 +760,10 @@ fn at13_universal_paste_setup_handles_commented_output_table() -> Result<(), Box
     let status = Command::new("sh")
         .arg(&script)
         .env("XDG_CONFIG_HOME", &config_home)
+        .env("KEYD_CONFIG_DIR", &keyd_config_dir)
+        .env("KEYD_COMMAND", "true")
+        .env("SKIP_KEYD_ACTIVATION", "1")
+        .env("SKIP_SOUNDVIBES_RESTART", "1")
         .status()?;
 
     assert!(status.success(), "setup should accept TOML table comments");
@@ -741,7 +774,9 @@ fn at13_universal_paste_setup_handles_commented_output_table() -> Result<(), Box
         Some("shift+insert")
     );
     assert_eq!(parsed["output"]["restore_clipboard"].as_bool(), Some(true));
+    assert_eq!(parsed["output"]["mode"].as_str(), Some("ydotool"));
     assert_eq!(parsed["hotkey"]["enabled"].as_bool(), Some(true));
+    assert_eq!(parsed["hotkey"]["key"].as_str(), Some("F24"));
     assert_eq!(configured.matches("[output]").count(), 1);
     Ok(())
 }

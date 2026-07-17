@@ -41,29 +41,19 @@ paste_keys = "ctrl+v"
 
 Keep root settings before `[output]` and `[hotkey]`; TOML keys following a table header belong to that table.
 
-### Universal paste on Linux desktops
+### Universal terminal paste and safe zero-delay typing
 
 Most graphical applications accept `Shift+Insert` as a clipboard paste shortcut. Konsole supports it by default, while Ghostty needs an explicit binding so it uses the regular clipboard instead of the selection clipboard. Configure SoundVibes and Ghostty together with:
 
 ```bash
 contrib/setup-universal-paste
-systemctl --user restart sv.service
 ```
 
-The setup script preserves existing settings and is safe to run repeatedly. Reload Ghostty with `Ctrl+Shift+,` or restart it after running the script.
+The script requires `keyd` and `ydotool`. It configures `AltGr+Right Ctrl` as a keyd chord that emits only `F24`, selects `F24` as the Soundvibes hold key, enables the zero-delay `ydotool` backend, starts both input daemons, and restarts Soundvibes when its user service is active. Because applications receive `F24` instead of either source modifier, continuous transcription cannot accidentally trigger shortcuts such as `Ctrl+Q` while the chord is held.
 
-To bypass the clipboard and type through the persistent `ydotoold` virtual keyboard instead, install and enable its user service, then change the output mode:
+Existing Soundvibes and Ghostty settings are preserved, and the script is safe to run repeatedly. It also retains `Shift+Insert` as a clipboard fallback. Reload Ghostty with `Ctrl+Shift+,` or restart it after running the script.
 
-```bash
-systemctl --user enable --now ydotool
-```
-
-```toml
-[output]
-mode = "ydotool"
-```
-
-Switch `mode` back to `"paste"` to restore clipboard paste. The ydotool backend uses zero key delay and zero key hold. It is very fast, but unlike clipboard paste it follows the active keyboard layout and has limited Unicode support.
+Switch `[output] mode` back to `"paste"` to restore clipboard paste. The ydotool backend uses zero key delay and zero key hold. It is very fast, but unlike clipboard paste it follows the active keyboard layout and has limited Unicode support.
 
 ## Run
 

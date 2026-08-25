@@ -41,6 +41,14 @@ paste_keys = "ctrl+v"
 
 Keep root settings before `[output]` and `[hotkey]`; TOML keys following a table header belong to that table.
 
+To compare transcription with text inserted by an output backend, enable transcript debug logging:
+
+```toml
+debug_transcripts = true
+```
+
+The equivalent CLI flag is `--debug-transcripts`. Each completed transcript is written to stderr as one escaped line before output processing, so a systemd service records it in the journal. Inspect recent entries with `journalctl --user -u sv.service`. This mode logs dictated text in plain text and is disabled by default.
+
 ### Universal terminal paste and safe zero-delay typing
 
 Most graphical applications accept `Shift+Insert` as a clipboard paste shortcut. Konsole supports it by default, while Ghostty needs an explicit binding so it uses the regular clipboard instead of the selection clipboard. Configure SoundVibes and Ghostty together with:

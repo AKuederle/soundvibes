@@ -129,3 +129,9 @@ These tests validate the product behavior for the offline Linux CLI.
 - Action: dictate text into a focused graphical text field.
 - Expect: Soundvibes sends the transcript through the existing daemon with zero key delay and zero key hold, without using the KDE-incompatible `wtype` path or the slower `dotool` fallback.
 - Pass: automated test-support verifies the exact daemon-client command and stdin payload; a hardware acceptance run verifies that a focused application receives the complete text.
+
+### AT-15: Opt-in transcript debug logging
+- Setup: set `debug_transcripts = true` or pass `--debug-transcripts`.
+- Command: start Soundvibes and complete an utterance containing quotes or a newline.
+- Expect: Soundvibes writes the exact transcript to stderr as one escaped debug line before sending it to the configured output backend.
+- Pass: automated test-support verifies the exact escaped log line; debug logging remains disabled by default.

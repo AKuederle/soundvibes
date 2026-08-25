@@ -46,6 +46,7 @@ pub struct DaemonConfig {
     pub segment_overlap_ms: u64,
     pub segment_min_ms: u64,
     pub debug_audio: bool,
+    pub debug_transcripts: bool,
     pub dump_audio: bool,
     pub audio_feedback: bool,
     pub no_speech_timeout_ms: u64,
@@ -667,6 +668,10 @@ fn emit_transcript(
     text: &str,
     info: audio::SegmentInfo,
 ) {
+    if config.debug_transcripts {
+        output.stderr(&format!("Debug transcript {}: {text:?}", info.index));
+    }
+
     match config.output.mode {
         OutputMode::Stdout => emit_stdout(config.format, output, text, info),
         OutputMode::Clipboard => {
@@ -1092,6 +1097,7 @@ pub mod test_support {
             segment_overlap_ms: DEFAULT_SEGMENT_OVERLAP_MS,
             segment_min_ms: DEFAULT_SEGMENT_MIN_MS,
             debug_audio: false,
+            debug_transcripts: false,
             dump_audio: false,
             audio_feedback: false,
             no_speech_timeout_ms: 0,

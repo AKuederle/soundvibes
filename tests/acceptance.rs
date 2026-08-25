@@ -805,6 +805,72 @@ fn at14_ydotool_mode_uses_zero_delay_daemon_client() -> Result<(), Box<dyn Error
 
 #[cfg(feature = "test-support")]
 #[test]
+fn at15_debug_transcripts_log_exact_text_before_output() -> Result<(), Box<dyn Error>> {
+    let (sender, receiver) = mpsc::channel();
+    let control_sender = sender.clone();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut output = OrderedOutput::default();
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::new(
+            vec!["Mic".to_string()],
+            vec![vec![0.2; 160]],
+        )),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
+            "hello\n\"world\"".to_string()
+        ])),
+    };
+    let config = DaemonConfig {
+        debug_transcripts: true,
+        ..daemon_config()
+    };
+
+    let shutdown_trigger = Arc::clone(&shutdown);
+    let control_thread = thread::spawn(move || {
+        let _ = control_sender.send(ControlEvent::StartRecording);
+        let _ = control_sender.send(ControlEvent::StopRecording);
+        thread::sleep(Duration::from_millis(50));
+        shutdown_trigger.store(true, Ordering::Relaxed);
+    });
+
+    sv::daemon::run_daemon_loop(&config, &deps, &mut output, receiver, shutdown.as_ref())?;
+    control_thread.join().expect("control thread failed");
+
+    let debug_position = output
+        .events
+        .iter()
+        .position(|event| event == r#"stderr:Debug transcript 1: "hello\n\"world\"""#)
+        .ok_or("missing exact transcript debug line")?;
+    let output_position = output
+        .events
+        .iter()
+        .position(|event| event == "stdout:Transcript 1: hello\n\"world\"")
+        .ok_or("missing transcript output line")?;
+    assert!(
+        debug_position < output_position,
+        "expected transcript debug line before output"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct OrderedOutput {
+    events: Vec<String>,
+}
+
+#[cfg(feature = "test-support")]
+impl DaemonOutput for OrderedOutput {
+    fn stdout(&mut self, message: &str) {
+        self.events.push(format!("stdout:{message}"));
+    }
+
+    fn stderr(&mut self, message: &str) {
+        self.events.push(format!("stderr:{message}"));
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[test]
 fn at12_daemon_status_is_acknowledged() -> Result<(), Box<dyn Error>> {
     let runtime_dir = temp_dir("soundvibes-acceptance-runtime");
     fs::create_dir_all(&runtime_dir)?;

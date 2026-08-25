@@ -287,13 +287,15 @@ fn type_text(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputErr
     run_dotool(&dotool_type_script(text), "typing", runner)
 }
 
+const YDOTOOL_KEY_TIMING_MS: &str = "3";
+
 fn type_text_ydotool(text: &str, runner: &mut dyn CommandRunner) -> Result<(), OutputError> {
     let args = vec![
         "type".to_string(),
         "--key-delay".to_string(),
-        "0".to_string(),
+        YDOTOOL_KEY_TIMING_MS.to_string(),
         "--key-hold".to_string(),
-        "0".to_string(),
+        YDOTOOL_KEY_TIMING_MS.to_string(),
         "--file".to_string(),
         "-".to_string(),
     ];
@@ -651,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn ydotool_mode_uses_the_persistent_daemon_with_zero_delay() {
+    fn ydotool_mode_uses_the_persistent_daemon_with_three_millisecond_timing() {
         let mut runner = TestRunner::default();
         runner.push_status(0);
         let config = OutputConfig {
@@ -666,7 +668,7 @@ mod tests {
         assert_eq!(runner.commands[0].program, "ydotool");
         assert_eq!(
             runner.commands[0].args,
-            ["type", "--key-delay", "0", "--key-hold", "0", "--file", "-",]
+            ["type", "--key-delay", "3", "--key-hold", "3", "--file", "-",]
         );
         assert_eq!(runner.commands[0].stdin, b"typed text");
     }

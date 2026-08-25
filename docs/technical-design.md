@@ -57,7 +57,7 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Report model reload failures to the requesting client instead of treating a successful socket write as a successful reload.
 
 ### Text Output
-- Use an output mode to select stdout, clipboard, paste, dotool typing, or zero-delay ydotool typing.
+- Use an output mode to select stdout, clipboard, paste, dotool typing, or low-delay ydotool typing.
 - Use `wl-clipboard` to capture and restore the Wayland clipboard.
 - Use `dotool` for paste shortcuts and direct typing through `/dev/uinput`.
 - Use the existing per-user `ydotoold` service when ydotool output is selected explicitly.

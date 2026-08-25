@@ -111,7 +111,7 @@ fi
 
 if [ "${SKIP_KEYD_ACTIVATION:-0}" != 1 ]; then
     if ! command -v ydotool >/dev/null 2>&1; then
-        printf '%s\n' 'ydotool is required for zero-delay transcript insertion.' >&2
+        printf '%s\n' 'ydotool is required for low-delay transcript insertion.' >&2
         exit 1
     fi
     systemctl --user enable --now ydotool.service
@@ -122,6 +122,6 @@ if [ "${SKIP_SOUNDVIBES_RESTART:-0}" != 1 ] && systemctl --user is-active sv.ser
 fi
 
 printf '%s\n' 'Configured AltGr+Right Ctrl as the F24 Soundvibes trigger through keyd.'
-printf '%s\n' 'Configured Soundvibes to use the zero-delay ydotool backend.'
+printf '%s\n' 'Configured Soundvibes to use the low-delay ydotool backend.'
 printf '%s\n' 'Configured Soundvibes and Ghostty to paste with Shift+Insert as a fallback.'
 printf '%s\n' 'Konsole already supports Shift+Insert with the regular clipboard; no override is needed.'

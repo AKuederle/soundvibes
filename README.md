@@ -49,7 +49,7 @@ debug_transcripts = true
 
 The equivalent CLI flag is `--debug-transcripts`. Each completed transcript is written to stderr as one escaped line before output processing, so a systemd service records it in the journal. Inspect recent entries with `journalctl --user -u sv.service`. This mode logs dictated text in plain text and is disabled by default.
 
-### Universal terminal paste and safe zero-delay typing
+### Universal terminal paste and safe low-delay typing
 
 Most graphical applications accept `Shift+Insert` as a clipboard paste shortcut. Konsole supports it by default, while Ghostty needs an explicit binding so it uses the regular clipboard instead of the selection clipboard. Configure SoundVibes and Ghostty together with:
 
@@ -57,11 +57,11 @@ Most graphical applications accept `Shift+Insert` as a clipboard paste shortcut.
 contrib/setup-universal-paste
 ```
 
-The script requires `keyd` and `ydotool`. It configures `AltGr+Right Ctrl` as a keyd chord that emits only `F24`, selects `F24` as the Soundvibes hold key, enables the zero-delay `ydotool` backend, starts both input daemons, and restarts Soundvibes when its user service is active. Because applications receive `F24` instead of either source modifier, continuous transcription cannot accidentally trigger shortcuts such as `Ctrl+Q` while the chord is held.
+The script requires `keyd` and `ydotool`. It configures `AltGr+Right Ctrl` as a keyd chord that emits only `F24`, selects `F24` as the Soundvibes hold key, enables the low-delay `ydotool` backend, starts both input daemons, and restarts Soundvibes when its user service is active. Because applications receive `F24` instead of either source modifier, continuous transcription cannot accidentally trigger shortcuts such as `Ctrl+Q` while the chord is held.
 
 Existing Soundvibes and Ghostty settings are preserved, and the script is safe to run repeatedly. It also retains `Shift+Insert` as a clipboard fallback. Reload Ghostty with `Ctrl+Shift+,` or restart it after running the script.
 
-Switch `[output] mode` back to `"paste"` to restore clipboard paste. The ydotool backend uses zero key delay and zero key hold. It is very fast, but unlike clipboard paste it follows the active keyboard layout and has limited Unicode support.
+Switch `[output] mode` back to `"paste"` to restore clipboard paste. The ydotool backend uses a 3 ms key delay and 3 ms key hold. This prevents applications from dropping or reordering synthetic key events while keeping insertion fast. Unlike clipboard paste, ydotool follows the active keyboard layout and has limited Unicode support.
 
 ## Run
 
@@ -86,7 +86,7 @@ Output modes:
 - `paste` (default): temporarily copies text, pastes with `dotool`, then restores the clipboard.
 - `clipboard`: leaves the transcript on the clipboard.
 - `type`: types text directly with `dotool`.
-- `ydotool`: types with zero delay through the existing `ydotoold` user service.
+- `ydotool`: types with a 3 ms key delay and hold through the existing `ydotoold` user service.
 - `stdout`: prints transcripts in the daemon terminal.
 
 Paste and clipboard modes require `wl-clipboard`; automatic paste and type modes require `dotool` plus `/dev/uinput` access. Ydotool mode requires the `ydotool` client and a running `ydotoold` user service.

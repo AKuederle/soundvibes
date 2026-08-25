@@ -783,7 +783,7 @@ fn at13_universal_paste_setup_handles_commented_output_table() -> Result<(), Box
 
 #[cfg(feature = "test-support")]
 #[test]
-fn at14_ydotool_mode_uses_zero_delay_daemon_client() -> Result<(), Box<dyn Error>> {
+fn at14_ydotool_mode_uses_three_millisecond_daemon_client() -> Result<(), Box<dyn Error>> {
     let mut runner = TestRunner::default();
     runner.push_status(0);
     let config = OutputConfig {
@@ -797,7 +797,7 @@ fn at14_ydotool_mode_uses_zero_delay_daemon_client() -> Result<(), Box<dyn Error
     assert_command(
         &runner.commands[0],
         "ydotool",
-        &["type", "--key-delay", "0", "--key-hold", "0", "--file", "-"],
+        &["type", "--key-delay", "3", "--key-hold", "3", "--file", "-"],
         b"fast text",
     );
     Ok(())

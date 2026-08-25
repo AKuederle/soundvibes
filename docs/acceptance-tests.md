@@ -120,14 +120,14 @@ These tests validate the product behavior for the offline Linux CLI.
 ### AT-13: Universal paste and safe typing setup
 - Setup: install `keyd` and `ydotool`, then use empty temporary `<config-home>` and keyd configuration directories.
 - Command: run `contrib/setup-universal-paste`.
-- Expect: keyd maps the `rightalt+rightcontrol` chord to `F24`; Soundvibes uses `F24` with the zero-delay `ydotool` backend; Ghostty maps `Shift+Insert` to the regular clipboard; and the script notes that Konsole supports the fallback by default.
+- Expect: keyd maps the `rightalt+rightcontrol` chord to `F24`; Soundvibes uses `F24` with the low-delay `ydotool` backend; Ghostty maps `Shift+Insert` to the regular clipboard; and the script notes that Konsole supports the fallback by default.
 - Pass: automated tests verify all three idempotent configuration files without requiring a live graphical session; a hardware run verifies that the chord produces `F24` without forwarded Ctrl or Alt modifiers.
 
-### AT-14: Zero-delay ydotool output
+### AT-14: Reliable low-delay ydotool output
 - Setup: install and start the per-user `ydotoold` service.
 - Command: start Soundvibes with `[output] mode = "ydotool"`.
 - Action: dictate text into a focused graphical text field.
-- Expect: Soundvibes sends the transcript through the existing daemon with zero key delay and zero key hold, without using the KDE-incompatible `wtype` path or the slower `dotool` fallback.
+- Expect: Soundvibes sends the transcript through the existing daemon with a 3 ms key delay and 3 ms key hold, without using the KDE-incompatible `wtype` path or the slower `dotool` fallback.
 - Pass: automated test-support verifies the exact daemon-client command and stdin payload; a hardware acceptance run verifies that a focused application receives the complete text.
 
 ### AT-15: Opt-in transcript debug logging

@@ -1,0 +1,16 @@
+Phonon-2 Rust integration
+
+Weight decoding, preprocessing, and ABI definitions derive from the
+Apache-2.0 fermion-research 0.2.6 Python implementation.
+Copyright 2026 Fermion Research.
+https://pypi.org/project/fermion-research/0.2.6/
+https://github.com/fermionresearch/phonon
+
+This integration ports those operations to Rust and adds owned FFI lifetimes.
+The external native binaries remain unmodified.
+
+Phonon-2 weights are CC-BY-4.0, derived from NVIDIA Parakeet TDT 0.6B v3.
+Copyright NVIDIA Corporation and Fermion Research.
+https://huggingface.co/FermionResearch/Phonon-2
+https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+https://creativecommons.org/licenses/by/4.0/

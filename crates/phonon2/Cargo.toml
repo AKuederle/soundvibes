@@ -1,0 +1,19 @@
+[package]
+name = "phonon2"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Offline Phonon-2 speech recognition through Fermion's native CPU engine"
+license = "GPL-3.0-only"
+
+[dependencies]
+half = "2"
+libloading = "0.8"
+matrixmultiply = "0.3"
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+hound = "3.5"

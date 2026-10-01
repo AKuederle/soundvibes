@@ -1,5 +1,6 @@
 models/*.bin
 target/
+__pycache__/
 .beads/export-state/
 web/node_modules/
 web/dist/

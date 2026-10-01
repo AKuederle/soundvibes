@@ -3,6 +3,10 @@ name = "sv"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+members = ["crates/phonon2"]
+resolver = "2"
+
 [features]
 default = ["vulkan"]
 test-support = []

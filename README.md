@@ -1,6 +1,6 @@
 # SoundVibes
 
-SoundVibes (`sv`) is a personal, offline speech-to-text CLI for Linux. It records while a configured evdev key is held, transcribes locally with whisper.cpp, and pastes or prints the result when the key is released.
+SoundVibes (`sv`) is a personal, offline speech-to-text CLI for Linux. It records while a configured evdev key is held, transcribes locally with whisper.cpp or Phonon-2, and pastes or prints the result when the key is released.
 
 ## Build and install
 
@@ -80,6 +80,42 @@ sv daemon stop
 ```
 
 `status` reports the current recording state and transcription language. Model changes return only after loading succeeds or fails.
+
+### Phonon-2
+
+Whisper is the default. Phonon-2 is a second option for English transcription on
+Linux CPUs. Prepare the original model and pinned native libraries once:
+
+```bash
+uv run --with zstandard python scripts/prepare-phonon2.py
+sv daemon start --engine phonon2
+```
+
+Setup requires Python 3.11+; inference runs entirely in Rust and the native CPU
+libraries. Assets go to `$XDG_DATA_HOME/soundvibes/models/phonon2`, defaulting to
+`~/.local/share/soundvibes/models/phonon2`. After setup, transcription works offline.
+
+To select it in your configuration, put these settings before any table headers:
+
+```toml
+engine = "phonon2"
+language = "en"
+sample_rate = 16000
+```
+
+Use `--model DIRECTORY` or `model = "/absolute/model/directory"` for a custom
+unpacked model location. Native libraries default to `DIRECTORY/native`; override
+with `--phonon2-library-dir DIRECTORY` or `phonon2_library_dir` in TOML.
+
+Phonon-2 supports `language = "en"` and `"auto"`, both using its English decoder.
+It requires 16 kHz mono audio and runs on CPU. `model_size`, `model_language` and
+`download_model` apply to Whisper. Phonon-2 uses the separate setup command;
+startup reports missing assets without downloading a Whisper model. Restart the
+daemon to change engines. `daemon set-model` changes Whisper sizes and is rejected
+by a Phonon-2 daemon without interrupting a recording.
+
+The dedicated [phonon2 crate](crates/phonon2/README.md) documents its API, native
+library provenance, and reproducible real-audio/Python comparison tests.
 
 Output modes:
 

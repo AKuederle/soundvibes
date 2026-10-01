@@ -43,6 +43,151 @@ use sv::output::OutputConfig;
 use sv::types::{OutputFormat, VadMode};
 
 #[test]
+fn at16_phonon2_rejects_unsupported_audio_configuration() -> Result<(), Box<dyn Error>> {
+    let config_home = temp_dir("soundvibes-phonon2-config");
+    write_config(&config_home, "")?;
+    for (args, message) in [
+        (vec!["--language", "es"], "English only"),
+        (vec!["--sample-rate", "48000"], "16000 Hz"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_sv"))
+            .args(["daemon", "start", "--engine", "phonon2"])
+            .args(args)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .output()?;
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(message), "{stderr}");
+    }
+    fs::remove_dir_all(config_home)?;
+    Ok(())
+}
+
+#[test]
+fn at16a_phonon2_missing_assets_report_setup_without_whisper_download() -> Result<(), Box<dyn Error>>
+{
+    let config_home = temp_dir("soundvibes-phonon2-config");
+    let model_dir = temp_dir("soundvibes-phonon2-model");
+    fs::create_dir_all(&model_dir)?;
+    write_config(&config_home, "engine = \"phonon2\"\n")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_sv"))
+        .args(["daemon", "start", "--download-model", "true", "--model"])
+        .arg(&model_dir)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("SV_MODEL_BASE_URL", "http://127.0.0.1:1")
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Phonon-2 model not found") && stderr.contains("prepare-phonon2.py"),
+        "{stderr}"
+    );
+    assert!(!model_dir.join("ggml-small.bin").exists());
+    fs::remove_dir_all(config_home)?;
+    fs::remove_dir_all(model_dir)?;
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn at16b_phonon2_real_model_transcribes_through_daemon_worker() -> Result<(), Box<dyn Error>> {
+    let Some(model_dir) = env::var_os("PHONON2_MODEL_DIR") else {
+        eprintln!("Skipping AT-16b; set PHONON2_MODEL_DIR and PHONON2_LIBRARY_DIR.");
+        return Ok(());
+    };
+    let library_dir = env::var_os("PHONON2_LIBRARY_DIR").ok_or("PHONON2_LIBRARY_DIR required")?;
+    let mut reader = hound::WavReader::open("vendor/whisper.cpp/samples/jfk.wav")?;
+    let samples: Vec<f32> = reader
+        .samples::<i16>()
+        .map(|s| s.map(|v| v as f32 / 32768.0))
+        .collect::<Result<_, _>>()?;
+    let config = DaemonConfig {
+        engine: sv::inference::InferenceEngine::Phonon2,
+        phonon2_library_dir: Some(PathBuf::from(library_dir)),
+        model_path: Some(PathBuf::from(model_dir)),
+        vad: VadMode::Off,
+        ..daemon_config()
+    };
+    let mut deps = DaemonDeps::for_config(&config)?;
+    deps.audio = Box::new(TestAudioBackend::new(vec!["Fixture".into()], vec![samples]));
+    let (sender, receiver) = mpsc::channel();
+    sender.send(ControlEvent::StartRecording)?;
+    sender.send(ControlEvent::StopRecording)?;
+    sender.send(ControlEvent::Stop)?;
+    let mut output = TestOutput::default();
+    sv::daemon::run_daemon_loop(
+        &config,
+        &deps,
+        &mut output,
+        receiver,
+        &AtomicBool::new(false),
+    )?;
+    let expected = "ask not what your country can do for you";
+    assert!(
+        output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.to_lowercase().contains(expected)
+                && line
+                    .to_lowercase()
+                    .contains("ask what you can do for your country")),
+        "stdout: {:?}; stderr: {:?}",
+        output.stdout_lines(),
+        output.stderr_lines()
+    );
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn at16c_phonon2_rejects_whisper_reload_without_interrupting_recording(
+) -> Result<(), Box<dyn Error>> {
+    let config = DaemonConfig {
+        engine: sv::inference::InferenceEngine::Phonon2,
+        ..daemon_config()
+    };
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::new(
+            vec!["Fixture".into()],
+            vec![vec![0.2; 1600]],
+        )),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["still recording".into()])),
+    };
+    let (sender, receiver) = mpsc::channel();
+    let (reply, response) = mpsc::sync_channel(1);
+    sender.send(ControlEvent::StartRecording)?;
+    sender.send(ControlEvent::Request {
+        event: Box::new(ControlEvent::SetModel {
+            size: ModelSize::Tiny,
+            model_language: ModelLanguage::En,
+        }),
+        respond_to: reply,
+    })?;
+    sender.send(ControlEvent::StopRecording)?;
+    sender.send(ControlEvent::Stop)?;
+    let mut output = TestOutput::default();
+    sv::daemon::run_daemon_loop(
+        &config,
+        &deps,
+        &mut output,
+        receiver,
+        &AtomicBool::new(false),
+    )?;
+    let response = response.recv_timeout(Duration::from_secs(1))?;
+    assert!(!response.ok);
+    assert!(response.message.unwrap_or_default().contains("set-model"));
+    assert!(
+        output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("Transcript 1: still recording")),
+        "{:?}",
+        output.stdout_lines()
+    );
+    Ok(())
+}
+
+#[test]
 fn at01_daemon_starts_with_valid_model() -> Result<(), Box<dyn Error>> {
     if env::var("SV_HARDWARE_TESTS").ok().as_deref() != Some("1") {
         eprintln!("Skipping AT-01; set SV_HARDWARE_TESTS=1 to run.");

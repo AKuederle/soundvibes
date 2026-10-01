@@ -18,6 +18,7 @@ These tests validate the product behavior for the offline Linux CLI.
   - `SV_HARDWARE_TESTS=1` to opt into microphone/GPU checks.
 - Automated acceptance tests live in `tests/acceptance.rs` and should map to the AT-xx entries below.
 - Run automated acceptance tests with `cargo test --test acceptance` (add `--features test-support` when using mocks).
+- Phonon-2 real-model tests require `PHONON2_MODEL_DIR` and `PHONON2_LIBRARY_DIR`; ordinary runs skip when the model variable is unset. Explicitly configured missing assets fail. Use release mode for large-model tests.
 
 ## Tests
 
@@ -135,3 +136,29 @@ These tests validate the product behavior for the offline Linux CLI.
 - Command: start Soundvibes and complete an utterance containing quotes or a newline.
 - Expect: Soundvibes writes the exact transcript to stderr as one escaped debug line before sending it to the configured output backend.
 - Pass: automated test-support verifies the exact escaped log line; debug logging remains disabled by default.
+
+### AT-16: Phonon-2 configuration
+- Setup: choose `engine = "phonon2"` or `--engine phonon2`.
+- Action: request a non-English language or a sample rate other than 16000 Hz.
+- Expect: exit code 2 and a specific configuration error before model loading or microphone access.
+- Automated: `at16_phonon2_rejects_unsupported_audio_configuration` in `tests/acceptance.rs`.
+- Configuration precedence is also tested by `reads_engine_and_library_directory_with_cli_precedence` in `src/main.rs`.
+
+### AT-16a: Phonon-2 asset setup
+- Setup: choose Phonon-2 through TOML and point `--model` at an empty directory.
+- Action: start with `download_model = true`.
+- Expect: exit code 2 with the Phonon-2 setup command; no Whisper model is downloaded.
+- Automated: `at16a_phonon2_missing_assets_report_setup_without_whisper_download`.
+
+### AT-16b: Real Phonon-2 transcription through the daemon
+- Setup: run `scripts/prepare-phonon2.py` and set `PHONON2_MODEL_DIR` and `PHONON2_LIBRARY_DIR` to the prepared assets.
+- Command: `cargo test --release --test acceptance --features test-support at16b -- --nocapture`.
+- Action: replay the bundled 16 kHz mono JFK recording through the daemon's audio adapter, real model factory and background transcription worker.
+- Expect: output contains both known "ask not" and "ask what" phrases. Inference uses no Python process or network.
+- Automated: `at16b_phonon2_real_model_transcribes_through_daemon_worker`. Missing environment variables skip; configured assets must load successfully.
+- Crate-level tests additionally compare the official CPU feature fixture, reject invalid containers, and exercise repeated decode, model reload and worker-thread migration. `PHONON2_REFERENCE_JSON` and `PHONON2_REFERENCE_FEATURES` enable full Python-reference comparison.
+
+### AT-16c: Whisper-size reload while Phonon-2 is selected
+- Action: issue `set-model` during an active Phonon-2 recording.
+- Expect: acknowledged error explaining the command applies to Whisper. The recording continues and emits its transcript when stopped.
+- Automated: `at16c_phonon2_rejects_whisper_reload_without_interrupting_recording` with `test-support`.

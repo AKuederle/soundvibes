@@ -106,6 +106,24 @@ pub fn prepare_model(
     Ok(PreparedModel { path, downloaded })
 }
 
+pub fn prepare_phonon2_model(explicit_path: Option<&Path>) -> Result<PreparedModel, AppError> {
+    let path = explicit_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_model_dir().join("phonon2"));
+    for filename in ["config.json", "model.fermion"] {
+        if !path.join(filename).is_file() {
+            return Err(AppError::config(format!(
+                "Phonon-2 model not found at {}: missing {filename}; prepare it with scripts/prepare-phonon2.py --directory {}",
+                path.display(), path.display()
+            )));
+        }
+    }
+    Ok(PreparedModel {
+        path,
+        downloaded: false,
+    })
+}
+
 fn default_model_dir() -> PathBuf {
     let data_home = env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)

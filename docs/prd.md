@@ -10,8 +10,8 @@ This PRD is a living document and should be updated as product requirements and 
 - Work fully offline with a small model and fast post-recording transcription.
 - Run as a background daemon that listens for a configured evdev hold key.
 - Use `sv daemon start` to run the service; holding the configured key records, releasing it stops and transcribes.
-- Ship as a single Rust CLI binary plus an automatically downloaded model file.
-- Automatically accelerate inference on NVIDIA/AMD GPUs when available, otherwise fall back to CPU.
+- Ship the default Whisper path as a single Rust CLI binary plus an automatically downloaded model file. Optional Phonon-2 uses separately prepared model assets and native CPU libraries.
+- Automatically accelerate Whisper on NVIDIA/AMD GPUs when available, otherwise fall back to CPU. Phonon-2 runs on CPU.
 - Keep local and pull-request quality gates aligned behind one command.
 
 ## Target Users
@@ -56,15 +56,17 @@ This PRD is a living document and should be updated as product requirements and 
 - Audio capture: `cpal` for mic input at 16 kHz mono.
 - Push-to-talk buffer: capture while the configured key is held, stop on release.
 - Optional VAD: trim trailing silence after release.
-- Inference: whisper.cpp via Rust FFI bindings, using quantized small models with GPU acceleration when available.
+- Inference: whisper.cpp via Rust FFI bindings with GPU acceleration when available, or the dedicated Phonon-2 Rust crate with native CPU libraries.
 - Output: final text output to stdout after transcription completes.
 - Control plane: daemon listens for evdev key events and keeps a local socket for lifecycle commands.
 - Text output: Wayland clipboard access through `wl-clipboard`, key input through `dotool`, and an explicit low-delay `ydotoold` mode.
 
 ## Model Choice
-- Engine: whisper.cpp (FFI) for best accuracy-to-size tradeoff.
+- Default engine: whisper.cpp through FFI.
+- Optional engine: Phonon-2, using the original Fermion Research weights and native CPU encoder/TDT decoder. English only, 16 kHz mono; no Python runtime dependency.
 - Default model: small general (ggml).
 - Model is downloaded on demand to a default location and loaded locally.
+- Phonon-2 assets are prepared separately with a pinned setup script. Restart the daemon to change engines; Whisper size reloads are rejected while Phonon-2 is selected.
 
 ## Performance Assumptions
 - Best-effort latency on CPU for a small model.
@@ -80,7 +82,7 @@ This PRD is a living document and should be updated as product requirements and 
 - Load config from XDG base directory if available.
 - Default path: `$XDG_CONFIG_HOME/soundvibes/config.toml`, or `~/.config/soundvibes/config.toml` when the variable is unset.
 - Config file format: TOML.
-- Config keys: `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
+- Config keys: `engine`, `phonon2_library_dir`, `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
 
 ## Validation Plan
 - Manual test on Linux laptop with default microphone.

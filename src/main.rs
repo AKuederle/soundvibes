@@ -9,6 +9,7 @@ use sv::audio;
 use sv::daemon;
 use sv::error::AppError;
 use sv::hotkey::HotkeyConfig;
+use sv::inference::InferenceEngine;
 use sv::model::{model_language_for_transcription, ModelLanguage, ModelSize, ModelSpec};
 use sv::output::{OutputConfig, OutputMode};
 use sv::segmentation::{
@@ -20,7 +21,18 @@ use sv::types::{AudioHost, OutputFormat, VadMode};
 #[derive(Parser, Debug)]
 #[command(name = "sv", version, about = "Offline speech-to-text CLI")]
 struct Cli {
-    #[arg(long, value_name = "PATH", global = true)]
+    #[arg(long, default_value = "whisper", global = true)]
+    engine: InferenceEngine,
+
+    #[arg(long, value_name = "DIRECTORY", global = true)]
+    phonon2_library_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        global = true,
+        help = "Whisper model file or unpacked Phonon-2 directory"
+    )]
     model: Option<PathBuf>,
 
     #[arg(long, default_value = "small", value_name = "SIZE", global = true)]
@@ -237,6 +249,12 @@ impl ConfigSources<'_> {
 impl Config {
     fn from_sources(cli: Cli, matches: &clap::ArgMatches, file: FileConfig) -> Self {
         let sources = ConfigSources { matches };
+        let engine = sources.value("engine", cli.engine, file.engine);
+        let phonon2_library_dir = sources.optional(
+            "phonon2_library_dir",
+            cli.phonon2_library_dir,
+            file.phonon2_library_dir,
+        );
         let language = sources.value("language", cli.language, file.language);
         let model_size = sources.value("model_size", cli.model_size, file.model_size);
 
@@ -340,6 +358,8 @@ impl Config {
             model_size,
             model_language,
             daemon: daemon::DaemonConfig {
+                engine,
+                phonon2_library_dir,
                 model_path,
                 download_model,
                 language,
@@ -370,6 +390,8 @@ impl Config {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct FileConfig {
+    engine: Option<InferenceEngine>,
+    phonon2_library_dir: Option<PathBuf>,
     model: Option<PathBuf>,
     model_path: Option<PathBuf>,
     model_size: Option<ModelSize>,
@@ -449,12 +471,26 @@ fn main() {
     let mut config = Config::from_sources(cli, &matches, file_config);
 
     let prepared_model = if mode == CliMode::RunDaemon {
+        if let Err(err) = config
+            .daemon
+            .engine
+            .validate_input(config.daemon.sample_rate, &config.daemon.language)
+        {
+            eprintln!("error: {err}");
+            process::exit(err.exit_code());
+        }
         let spec = ModelSpec::new(config.model_size, config.model_language);
-        match sv::model::prepare_model(
-            config.daemon.model_path.as_deref(),
-            &spec,
-            config.daemon.download_model,
-        ) {
+        let prepared = match config.daemon.engine {
+            InferenceEngine::Whisper => sv::model::prepare_model(
+                config.daemon.model_path.as_deref(),
+                &spec,
+                config.daemon.download_model,
+            ),
+            InferenceEngine::Phonon2 => {
+                sv::model::prepare_phonon2_model(config.daemon.model_path.as_deref())
+            }
+        };
+        match prepared {
             Ok(prepared) => Some(prepared),
             Err(err) => {
                 eprintln!("error: {err}");
@@ -466,6 +502,7 @@ fn main() {
     };
 
     println!("SoundVibes sv {}", env!("CARGO_PKG_VERSION"));
+    println!("Engine: {:?}", config.daemon.engine);
     if let Some(prepared) = &prepared_model {
         if prepared.downloaded {
             println!("Model download complete.");
@@ -497,7 +534,13 @@ fn main() {
         run_test_audio(&config.daemon)
     } else {
         config.daemon.model_path = prepared_model.map(|prepared| prepared.path);
-        let deps = daemon::DaemonDeps::default();
+        let deps = match daemon::DaemonDeps::for_config(&config.daemon) {
+            Ok(deps) => deps,
+            Err(err) => {
+                eprintln!("error: {err}");
+                process::exit(err.exit_code());
+            }
+        };
         let mut output = daemon::StdoutOutput;
         daemon::run_daemon(&config.daemon, &deps, &mut output)
     };
@@ -794,6 +837,51 @@ mod tests {
 
         assert_eq!(config.model_size, ModelSize::LargeV3Turbo);
         assert_eq!(config.model_language, ModelLanguage::Auto);
+    }
+
+    #[test]
+    fn reads_engine_and_library_directory_with_cli_precedence() {
+        let file: FileConfig =
+            toml::from_str("engine = \"phonon2\"\nphonon2_library_dir = \"/config/native\"\n")
+                .expect("config");
+        let matches = Cli::command()
+            .try_get_matches_from(["sv", "daemon", "start"])
+            .expect("cli");
+        let config = Config::from_sources(
+            Cli::from_arg_matches(&matches).expect("cli"),
+            &matches,
+            file,
+        );
+        assert_eq!(config.daemon.engine, InferenceEngine::Phonon2);
+        assert_eq!(
+            config.daemon.phonon2_library_dir,
+            Some(PathBuf::from("/config/native"))
+        );
+
+        let file: FileConfig =
+            toml::from_str("engine = \"phonon2\"\nphonon2_library_dir = \"/config/native\"\n")
+                .expect("config");
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "sv",
+                "daemon",
+                "start",
+                "--engine",
+                "whisper",
+                "--phonon2-library-dir",
+                "/cli/native",
+            ])
+            .expect("cli");
+        let config = Config::from_sources(
+            Cli::from_arg_matches(&matches).expect("cli"),
+            &matches,
+            file,
+        );
+        assert_eq!(config.daemon.engine, InferenceEngine::Whisper);
+        assert_eq!(
+            config.daemon.phonon2_library_dir,
+            Some(PathBuf::from("/cli/native"))
+        );
     }
 
     #[test]

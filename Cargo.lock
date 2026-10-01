@@ -1504,6 +1504,7 @@ dependencies = [
  "evdev",
  "hound",
  "libc",
+ "phonon2",
  "regex",
  "ringbuf",
  "serde",

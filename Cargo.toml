@@ -13,6 +13,7 @@ test-support = []
 vulkan = []
 
 [dependencies]
+phonon2 = { path = "crates/phonon2" }
 clap = { version = "4.5.27", features = ["derive"] }
 cpal = "0.15.3"
 evdev = "0.12"

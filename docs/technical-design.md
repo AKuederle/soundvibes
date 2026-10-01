@@ -1,14 +1,14 @@
 # Technical Design: Soundvibes Offline Voice-to-Text CLI
 
 ## Overview
-This document describes the technical design for the `sv` CLI that performs offline, start/stop voice-to-text on Linux using whisper.cpp with a small quantized model.
+This document describes the technical design for the `sv` CLI that performs offline, start/stop voice-to-text on Linux using whisper.cpp or Phonon-2.
 
 ## Goals
-- Single binary plus automatic model download to a local path.
+- Whisper uses a single binary plus automatic model download to a local path. Optional Phonon-2 uses separately prepared model assets and native CPU libraries.
 - Start/stop capture with transcription after capture stops.
 - Best-effort latency on CPU.
 - Support daemon mode with socket-based control and text injection at the cursor.
-- Automatically use NVIDIA/AMD GPUs for inference when available, falling back to CPU.
+- Whisper automatically uses NVIDIA/AMD GPUs when available, falling back to CPU. Phonon-2 uses its native CPU engine.
 
 ## Architecture
 - CLI entrypoint loads configuration.
@@ -16,7 +16,7 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Audio capture pipeline reads microphone input via `cpal` while the configured key is held.
 - A buffer aggregates audio frames for post-recording inference.
 - Optional VAD trims trailing silence after release.
-- whisper.cpp runs inference on the captured buffer.
+- The selected engine runs inference on the captured buffer in the background transcription worker.
 - Output stream prints a final transcript.
 - Optional daemon service runs continuously and injects text into the focused app.
 
@@ -70,16 +70,25 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Systemd user unit or foreground mode used to manage lifecycle.
 
 ### Inference Engine
-- whisper.cpp bound via Rust FFI.
+- `engine = "whisper"` is the default, bound to whisper.cpp through Rust FFI.
 - Ensure the configured ggml model is downloaded before loading at startup.
 - Run inference on captured audio and return a final transcript.
 - Use a small quantized model for CPU speed.
 - Attempt GPU acceleration automatically; fall back to CPU when no supported GPU backend is detected.
 
+- `engine = "phonon2"` selects the dedicated `crates/phonon2` Rust abstraction.
+- Use the original model container and native ABI 1 encoder/TDT libraries from fermion-research 0.2.6, pinned by SHA256.
+- The crate owns model weights and handles, computes the CPU log-mel front end, applies the encoder projection, and renders vocabulary tokens. It requires no Python runtime.
+- Phonon-2 is English only and accepts 16 kHz mono PCM. Validate configuration before model loading or capture.
+- Native calls are serialized across models. Initialize native thread pools once and retain libraries for process lifetime; model handles and weights are freed on drop.
+- Prepare Phonon-2 assets separately with `scripts/prepare-phonon2.py`. `model` identifies the unpacked directory, and native libraries default to its `native` subdirectory, with `phonon2_library_dir` as an override.
+- Restart to switch engines. A Phonon-2 daemon rejects the Whisper-size `set-model` command before altering recording or worker state.
+
 ### Model Download
 - On `sv`/`sv daemon start` startup, check for the configured model in the default data directory.
 - Download the ggml model if missing, based on `model_language` and `model_size` config (defaults to small + general). `large-v3-turbo` is supported as a multilingual-only model size.
 - If `model_path` is provided, download or resolve the model there instead of the default location.
+- The automatic downloader applies to Whisper. Phonon-2 startup checks prepared assets and reports its setup command when they are missing.
 
 ### GPU Backend Selection
 - Build whisper.cpp with Vulkan enabled for supported AMD/NVIDIA devices.
@@ -98,7 +107,7 @@ This document describes the technical design for the `sv` CLI that performs offl
 
 ## Configuration
 - Format: TOML.
-- Example fields: `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
+- Example fields: `engine`, `phonon2_library_dir`, `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
 
 ## Data Flow
 1. CLI loads config and model.

@@ -3,6 +3,7 @@ pub mod daemon;
 pub mod error;
 mod feedback;
 pub mod hotkey;
+pub mod inference;
 pub mod model;
 pub mod output;
 pub mod segmentation;

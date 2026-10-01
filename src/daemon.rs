@@ -19,16 +19,18 @@ use crate::audio;
 use crate::error::AppError;
 use crate::feedback;
 use crate::hotkey::{self, HotkeyConfig};
+use crate::inference::{InferenceEngine, InferenceFactory};
 use crate::model::{self, ModelLanguage, ModelSize, ModelSpec};
 use crate::output::{self, OutputConfig, OutputMode};
 use crate::segmentation::{self, CutReason, SegmentConfig, SegmentDecision};
 pub use crate::transcription_worker::Transcriber;
 use crate::transcription_worker::{TranscriptionJob, TranscriptionResult, TranscriptionWorker};
 use crate::types::{AudioHost, OutputFormat, VadMode};
-use crate::whisper::WhisperContext;
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
+    pub engine: InferenceEngine,
+    pub phonon2_library_dir: Option<PathBuf>,
     pub model_path: Option<PathBuf>,
     pub download_model: bool,
     pub language: String,
@@ -93,12 +95,18 @@ pub struct DaemonDeps {
     pub transcriber_factory: Box<dyn TranscriberFactory>,
 }
 
-impl Default for DaemonDeps {
-    fn default() -> Self {
-        Self {
+impl DaemonDeps {
+    pub fn for_config(config: &DaemonConfig) -> Result<Self, AppError> {
+        config
+            .engine
+            .validate_input(config.sample_rate, &config.language)?;
+        Ok(Self {
             audio: Box::new(CpalAudioBackend),
-            transcriber_factory: Box::new(WhisperFactory),
-        }
+            transcriber_factory: Box::new(InferenceFactory::new(
+                config.engine,
+                config.phonon2_library_dir.clone(),
+            )),
+        })
     }
 }
 
@@ -271,6 +279,9 @@ pub fn run_daemon_loop(
     control_events: Receiver<ControlEvent>,
     shutdown: &AtomicBool,
 ) -> Result<(), AppError> {
+    config
+        .engine
+        .validate_input(config.sample_rate, &config.language)?;
     let host = select_audio_host(config.audio_host)?;
     audio::configure_alsa_logging(config.debug_audio);
     let devices = deps
@@ -523,6 +534,9 @@ fn reload_model(
     output: &mut dyn DaemonOutput,
     last_emitted_transcript: &mut String,
 ) -> Result<String, AppError> {
+    if config.engine == InferenceEngine::Phonon2 {
+        return Err(AppError::config("set-model changes Whisper sizes; restart the daemon to change the Phonon-2 engine or model directory"));
+    }
     if recording.take().is_some() {
         output.stdout("Recording stopped for model reload.");
     }
@@ -1033,29 +1047,6 @@ impl CaptureSource for CpalCapture {
     }
 }
 
-struct WhisperFactory;
-
-impl TranscriberFactory for WhisperFactory {
-    fn load(&self, model_path: Option<&Path>) -> Result<Box<dyn Transcriber>, AppError> {
-        let model_path = model_path.ok_or_else(|| AppError::config("model path is required"))?;
-        let context = WhisperContext::from_file(model_path)
-            .map_err(|err| AppError::runtime(err.to_string()))?;
-        Ok(Box::new(WhisperTranscriber { context }))
-    }
-}
-
-struct WhisperTranscriber {
-    context: WhisperContext,
-}
-
-impl Transcriber for WhisperTranscriber {
-    fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String, AppError> {
-        self.context
-            .transcribe(samples, language)
-            .map_err(|err| AppError::runtime(err.to_string()))
-    }
-}
-
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::collections::VecDeque;
@@ -1077,6 +1068,8 @@ pub mod test_support {
 
     pub fn daemon_config() -> DaemonConfig {
         DaemonConfig {
+            engine: crate::inference::InferenceEngine::Whisper,
+            phonon2_library_dir: None,
             model_path: None,
             download_model: false,
             language: "en".to_string(),

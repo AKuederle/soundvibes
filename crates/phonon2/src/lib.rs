@@ -2,6 +2,7 @@
 
 mod container;
 mod features;
+mod hotwords;
 mod native;
 
 pub use features::{log_mel, Features};
@@ -15,6 +16,8 @@ use native::Native;
 type Result<T> = std::result::Result<T, Error>;
 
 static NATIVE_LOCK: Mutex<()> = Mutex::new(());
+
+pub const MAX_HOTWORDS: usize = 25;
 
 #[derive(Debug)]
 pub struct Error(String);
@@ -64,10 +67,13 @@ pub struct Model {
     projector: Vec<f32>,
     projector_bias: Vec<f32>,
     vocabulary: Vec<String>,
+    hotwords: Vec<String>,
+    bias: Option<hotwords::Bias>,
+    hotword_strength: f32,
 }
 
 impl Model {
-    /// Load an unpacked model directory and libraries from fermion-research 0.2.6.
+    /// Load an unpacked model directory and libraries from fermion-research 0.2.11.
     /// No downloads occur here. See scripts/prepare-phonon2.py for asset setup.
     pub fn load(model_dir: &Path, library_dir: &Path) -> Result<Self> {
         let config = model_dir.join("config.json");
@@ -99,7 +105,29 @@ impl Model {
             projector,
             projector_bias,
             vocabulary,
+            hotwords: Vec::new(),
+            bias: None,
+            hotword_strength: 2.0,
         })
+    }
+
+    /// Bias subsequent transcriptions toward up to 25 terms. Empty terms disable bias.
+    /// Strength is in logit units, from 0 to 100; upstream defaults to 2.0.
+    pub fn set_hotwords(&mut self, words: &[String], strength: f32) -> Result<()> {
+        if words.len() > MAX_HOTWORDS {
+            return Err(Error::new("Phonon-2 supports at most 25 hotwords"));
+        }
+        if !strength.is_finite() || !(0.0..=100.0).contains(&strength) {
+            return Err(Error::new("hotword strength must be between 0 and 100"));
+        }
+        if self.hotwords == words && self.hotword_strength == strength {
+            return Ok(());
+        }
+        let bias = hotwords::Bias::compile(words, &self.vocabulary, strength)?;
+        self.hotwords = words.to_vec();
+        self.hotword_strength = strength;
+        self.bias = bias;
+        Ok(())
     }
 
     /// Transcribe finite mono f32 PCM at 16 kHz. Phonon-2 supports English only.
@@ -147,7 +175,7 @@ impl Model {
                     *value += bias;
                 }
             }
-            let tokens = native.decode(&projected)?;
+            let tokens = native.decode(&projected, self.bias.as_ref())?;
             let mut text = String::new();
             for token in tokens {
                 if token == 8192 {

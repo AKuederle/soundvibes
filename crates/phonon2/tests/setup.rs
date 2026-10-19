@@ -13,7 +13,7 @@ fn preparing_assets_preserves_already_mapped_native_libraries(
     let python = env::var_os("PHONON2_SETUP_PYTHON").unwrap_or_else(|| "python3".into());
     let directory = env::temp_dir().join(format!("phonon2-setup-{}", std::process::id()));
     std::fs::create_dir_all(&directory)?;
-    for name in ["fermion_research-0.2.6-py3-none-any.whl", "model-NOTICE"] {
+    for name in ["fermion_research-0.2.11-py3-none-any.whl", "model-NOTICE"] {
         std::fs::copy(Path::new(&model_dir).join(name), directory.join(name))?;
     }
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/prepare-phonon2.py");

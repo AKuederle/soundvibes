@@ -1,4 +1,4 @@
-//! ABI 1 from fermion-research 0.2.6's ctypes bindings. See README for provenance.
+//! Encoder ABI 1 and TDT ABI 3 from fermion-research 0.2.11's ctypes bindings.
 use libloading::Library;
 use sha2::{Digest, Sha256};
 
@@ -8,6 +8,7 @@ use std::ptr::NonNull;
 use std::sync::{Once, OnceLock};
 
 use crate::container::{Container, Planes, Quantized};
+use crate::hotwords::Bias;
 use crate::{Error, Result};
 
 type Ptr = *const c_void;
@@ -64,7 +65,9 @@ type CreateDecoder = unsafe extern "C" fn(
     Ptr,
     Ptr,
 ) -> Handle;
-type Decode = unsafe extern "C" fn(Handle, Ptr, c_int, *mut c_void, c_int) -> c_int;
+type Decode =
+    unsafe extern "C" fn(Handle, Ptr, c_int, *mut c_void, *mut c_void, *mut c_void, c_int) -> c_int;
+type SetBias = unsafe extern "C" fn(Handle, c_int, c_int, Ptr, Ptr, Ptr, c_int, Ptr, f32) -> c_int;
 
 // Upstream pools keep worker threads running after handles are destroyed. Never
 // unload their executable code, or reset a pool that has already processed work.
@@ -88,6 +91,7 @@ pub(crate) struct Native {
     forward: Forward,
     out_len: unsafe extern "C" fn(Handle, c_int) -> c_int,
     decode: Decode,
+    set_bias: SetBias,
     set_encoder_threads: unsafe extern "C" fn(c_int),
     set_decoder_threads: unsafe extern "C" fn(c_int),
 }
@@ -98,7 +102,7 @@ unsafe impl Send for Native {}
 
 macro_rules! symbol {
     ($lib:expr, $name:literal, $ty:ty) => {{
-        // SAFETY: these signatures are copied from the pinned ABI 1 ctypes bindings.
+        // SAFETY: these signatures are copied from the pinned ctypes bindings.
         unsafe { *$lib.get::<$ty>(concat!($name, "\0").as_bytes())? }
     }};
 }
@@ -108,13 +112,13 @@ impl Native {
         let (enc_name, enc_pin, tdt_name, tdt_pin) = library_names()?;
         let encoder_library = verified_library(directory, enc_name, enc_pin, &ENCODER_LIBRARY)?;
         let decoder_library = verified_library(directory, tdt_name, tdt_pin, &DECODER_LIBRARY)?;
-        for (lib, name) in [
-            (&encoder_library, "phonon2_cpu_abi_version"),
-            (&encoder_library, "phonon2_enc_abi_version"),
-            (&decoder_library, "phonon2_tdt_abi_version"),
+        for (lib, name, version) in [
+            (&encoder_library, "phonon2_cpu_abi_version", 1),
+            (&encoder_library, "phonon2_enc_abi_version", 1),
+            (&decoder_library, "phonon2_tdt_abi_version", 3),
         ] {
             let function = unsafe { *lib.get::<unsafe extern "C" fn() -> c_int>(name.as_bytes())? };
-            if unsafe { function() } != 1 {
+            if unsafe { function() } != version {
                 return Err(Error::new(format!("unsupported native ABI: {name}")));
             }
         }
@@ -150,7 +154,8 @@ impl Native {
                 "phonon2_enc_out_len",
                 unsafe extern "C" fn(Handle, c_int) -> c_int
             ),
-            decode: symbol!(decoder_library, "phonon2_tdt_decode", Decode),
+            decode: symbol!(decoder_library, "phonon2_tdt_decode_timed", Decode),
+            set_bias: symbol!(decoder_library, "phonon2_tdt_set_bias", SetBias),
             set_encoder_threads: symbol!(
                 encoder_library,
                 "phonon2_cpu_set_threads",
@@ -429,23 +434,64 @@ impl Native {
         Ok(output)
     }
 
-    pub fn decode(&self, projected: &[f32]) -> Result<Vec<i32>> {
+    pub fn decode(&self, projected: &[f32], bias: Option<&Bias>) -> Result<Vec<i32>> {
         let handle = self
             .decoder
             .ok_or_else(|| Error::new("decoder missing"))?
             .as_ptr();
         let frames = projected.len() / 640;
         let mut tokens = vec![0; (frames * 12).max(64)];
-        // SAFETY: contiguous frames*640 input and token buffer with explicit capacity.
+        let mut emission_frames = vec![0; tokens.len()];
+        let mut durations = vec![0; tokens.len()];
+        if let Some(bias) = bias {
+            // SAFETY: compiled tables have matching dimensions and remain alive
+            // until the decoder is disarmed below. Calls hold NATIVE_LOCK.
+            check(
+                unsafe {
+                    (self.set_bias)(
+                        handle,
+                        bias.depth.len() as c_int,
+                        bias.tokens.len() as c_int,
+                        bias.table.as_ptr().cast(),
+                        bias.tokens.as_ptr().cast(),
+                        bias.columns.as_ptr().cast(),
+                        bias.columns.len() as c_int,
+                        bias.depth.as_ptr().cast(),
+                        bias.strength,
+                    )
+                },
+                "set hotword bias",
+            )?;
+        }
+        // SAFETY: contiguous frames*640 input and three buffers of explicit capacity.
         let count = unsafe {
             (self.decode)(
                 handle,
                 projected.as_ptr().cast(),
                 frames as c_int,
                 tokens.as_mut_ptr().cast(),
+                emission_frames.as_mut_ptr().cast(),
+                durations.as_mut_ptr().cast(),
                 tokens.len() as c_int,
             )
         };
+        // SAFETY: the native API releases borrowed table pointers when disarmed.
+        check(
+            unsafe {
+                (self.set_bias)(
+                    handle,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0.0,
+                )
+            },
+            "clear hotword bias",
+        )?;
         if count < 0 || count as usize > tokens.len() {
             return Err(Error::new(format!("TDT decode failed: {count}")));
         }
@@ -517,19 +563,19 @@ fn library_names() -> Result<(&'static str, &'static str, &'static str, &'static
             if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
                 (
                     "libphonon2_enc-linux-x86_64.so",
-                    "8b0beb8c7dc4e4239b4f3348b28750530739711e9204a411e8ff8eceeabe20a3",
+                    "57e059d726d47a0ef72dc9537d5247631a6d171ebaf036cd72df62b415d68365",
                 )
             } else {
                 (
                     "libphonon2_enc-linux-x86_64-base.so",
-                    "c5eca3010708249edb4165356689e6b93dcaed75dc27c24f0b4b7471f6025b81",
+                    "ffed0c3de6c3676f80d301fcff6e57705d38d1a0fb6d23ee1a1819da29e3d3fb",
                 )
             };
         Ok((
             enc,
             pin,
             "libphonon2_tdt-linux-x86_64.so",
-            "3c0bea612b60c053865fbb6f315b39b481bc37f0429fa4608cdaed4d11d1b468",
+            "7d4853cb206d1a4aeb257b91ca6fa8552c27f48c1fa7cf7f9335d3a2889a6930",
         ))
     }
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
@@ -539,16 +585,16 @@ fn library_names() -> Result<(&'static str, &'static str, &'static str, &'static
         {
             return Ok((
                 "libphonon2_enc-linux-aarch64.so",
-                "084de96e3f623fb1b35d390b54d57db67f1c2ab8c6abecdbd48d261ac58c5f08",
+                "389a0d78d9377d63b98cd611738403815ba2c111b2caea4bbeb5ea890270093b",
                 "libphonon2_tdt-linux-aarch64.so",
-                "edb874d62311169dc305e3604fd3595813c07a7af5045fa67385e9c57838dbe5",
+                "afa73fed5a545cd5d1193cc86773b6e6ec0fc1d0163bcbea726d32a41353105d",
             ));
         }
         Ok((
             "libphonon2_enc-linux-aarch64-base.so",
-            "72c9d1916f32f00fddd172126cfaa2e51ae4aaaa391e96fbcb716b12dd856758",
+            "09d8bc2967e52430408ca9dcda09d7d71a7780e2937b45abd5722471563777fa",
             "libphonon2_tdt-linux-aarch64-base.so",
-            "b48179d39bb35ffc51169c3bed4845b2959217cfd02dbf74cf9abe9e21cd1b72",
+            "90fcf4765aecae1a86175f98488ffff1ed217a0d9d00be3b95be8d610ba2d3ce",
         ))
     }
     #[cfg(not(all(

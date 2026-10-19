@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record the official 0.2.6 CPU transcript and front end for comparison with Rust."""
+"""Record the official 0.2.11 CPU transcript and front end for comparison with Rust."""
 import argparse
 import json
 import os

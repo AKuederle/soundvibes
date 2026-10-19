@@ -18,8 +18,8 @@ MODEL_BASE = f"https://huggingface.co/FermionResearch/Phonon-2/resolve/{REVISION
 ARCHIVE_HASH = "98125795b6dda72f5c6eee9ba33d19815df65dcb18b50a357bf9f73c9935309e"
 CONTAINER_HASH = "4b6bfa3a12cc3c4e0a54f2ab3ec4ca7a842b09e5c7ecfc8e7ca0ac6cc8c11468"
 NOTICE_HASH = "00624a5043e7ce74029317b024132ca5286116d6fbf3191d226374bc8273789f"
-WHEEL_URL = "https://files.pythonhosted.org/packages/12/c5/88d375aa14a8e8efb816fb35b73221cbe2648ee068b0fa059809de241579/fermion_research-0.2.6-py3-none-any.whl"
-WHEEL_HASH = "ce7c6c6ab0802b490bef45f2cd6cb2545ca6fe3ae91bd25d6548d7839796f2ff"
+WHEEL_URL = "https://files.pythonhosted.org/packages/35/c3/90dc124286ce01004ddb30cd302381aad79fc281899d7dd2973ec85faef6/fermion_research-0.2.11-py3-none-any.whl"
+WHEEL_HASH = "c4097574ef42e96caf31732097321da9e16c0b9108b5c616aa9d5d1f540319f8"
 
 
 def digest(path):
@@ -85,7 +85,7 @@ def main():
     config = json.loads((root / "config.json").read_text())
     if len(config["joint"]["vocabulary"]) != 8192:
         raise RuntimeError("Unexpected model vocabulary")
-    wheel = root / "fermion_research-0.2.6-py3-none-any.whl"
+    wheel = root / "fermion_research-0.2.11-py3-none-any.whl"
     fetch(WHEEL_URL, wheel, WHEEL_HASH)
     libraries = root / "native"
     libraries.mkdir(exist_ok=True)

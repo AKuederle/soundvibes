@@ -94,6 +94,25 @@ fn transcribes_real_audio_without_python() -> Result<(), Box<dyn std::error::Err
         text,
         "decoder state must reset between utterances"
     );
+    model.set_hotwords(&["Quillon".to_string()], 20.0)?;
+    let biased = model.transcribe(&samples)?;
+    assert!(biased.to_lowercase().contains("quillon"), "{biased}");
+    assert!(model
+        .set_hotwords(&vec!["term".to_string(); 26], 2.0)
+        .is_err());
+    assert!(model.set_hotwords(&[], f32::NAN).is_err());
+    model.set_hotwords(&[], 2.0)?;
+    assert_eq!(
+        model.transcribe(&samples)?,
+        text,
+        "clearing hotwords must reset bias"
+    );
+    model.set_hotwords(&["Quillon".to_string()], 0.0)?;
+    assert_eq!(
+        model.transcribe(&samples)?,
+        text,
+        "zero strength disables bias"
+    );
     assert_eq!(model.transcribe(&[])?, "");
     assert!(model.transcribe(&[f32::NAN; 320]).is_err());
     drop(model);

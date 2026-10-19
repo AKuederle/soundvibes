@@ -1,9 +1,9 @@
 Phonon-2 Rust integration
 
 Weight decoding, preprocessing, and ABI definitions derive from the
-Apache-2.0 fermion-research 0.2.6 Python implementation.
+Apache-2.0 fermion-research 0.2.11 Python implementation.
 Copyright 2026 Fermion Research.
-https://pypi.org/project/fermion-research/0.2.6/
+https://pypi.org/project/fermion-research/0.2.11/
 https://github.com/fermionresearch/phonon
 
 This integration ports those operations to Rust and adds owned FFI lifetimes.

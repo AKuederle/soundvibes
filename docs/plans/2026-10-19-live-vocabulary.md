@@ -24,15 +24,15 @@ Review units and gates:
 
 Acceptance checklist:
 
-- [ ] Default directory under the Soundvibes config directory; CLI overrides TOML.
-- [ ] Each app owns a UTF-8 `.txt` file, one word or phrase per line.
-- [ ] Deterministic merging, case-insensitive deduplication, blank/comment handling.
-- [ ] Additions, edits, atomic replacements, and deletions affect the next segment.
-- [ ] Missing directory is empty and can be created while the daemon runs.
-- [ ] Invalid/unreadable snapshots warn and retain the last successfully loaded list.
-- [ ] Whisper receives vocabulary as a prompt; Phonon-2 receives native hotwords.
-- [ ] Engine capacity limits are documented and reported rather than silently hidden.
-- [ ] Acceptance tests in `tests/acceptance.rs` map to `docs/acceptance-tests.md`.
+- [x] Default directory under the Soundvibes config directory; CLI overrides TOML.
+- [x] Each app owns a UTF-8 `.txt` file, one word or phrase per line.
+- [x] Deterministic merging, case-insensitive deduplication, blank/comment handling.
+- [x] Additions, edits, atomic replacements, and deletions affect the next segment.
+- [x] Missing directory is empty and can be created while the daemon runs.
+- [x] Invalid/unreadable snapshots warn and retain the last successfully loaded list.
+- [x] Whisper receives vocabulary as a prompt; Phonon-2 receives native hotwords.
+- [x] Engine capacity limits are documented and reported rather than silently hidden.
+- [x] Acceptance tests in `tests/acceptance.rs` map to `docs/acceptance-tests.md`.
 - [ ] Format, lint, tests, release build, reviews, commits and remote push complete.
 
 Verification record:
@@ -49,3 +49,13 @@ Verification record:
 - The mapped-library setup regression passed with the cached model archive and
   0.2.11 wheel. An initial attempt used a nonexistent archive path; the corrected
   run used the cached reference archive. Existing installed model assets were not modified.
+
+- First review unit: `bcbf84c`, RoboRev job 15791 passed with no findings and is closed.
+- AT-17 and AT-17a passed with the same daemon processing each sequence, using
+  acknowledged control requests instead of sleeps. Configuration precedence and
+  existing worker sequencing/reload tests passed.
+- Real Whisper small.en on Vulkan passed vocabulary hints, capacity and clearing.
+- Workspace all-target/all-feature Clippy passed. The real Phonon-2 daemon test
+  passed in release mode, including delivery from a 26-term directory and a visible
+  25-term capacity warning. Full workspace tests with both model paths configured
+  and the release workspace build are in progress.

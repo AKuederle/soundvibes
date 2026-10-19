@@ -42,6 +42,214 @@ use sv::output::OutputConfig;
 #[cfg(feature = "test-support")]
 use sv::types::{OutputFormat, VadMode};
 
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct VocabularyTranscriber {
+    words: Vec<String>,
+}
+
+#[cfg(feature = "test-support")]
+impl sv::daemon::Transcriber for VocabularyTranscriber {
+    fn set_vocabulary(&mut self, words: &[String]) -> Result<Option<String>, AppError> {
+        self.words = words.to_vec();
+        Ok(None)
+    }
+
+    fn transcribe(&self, _samples: &[f32], _language: Option<&str>) -> Result<String, AppError> {
+        Ok(if self.words.is_empty() {
+            "<empty>".to_string()
+        } else {
+            self.words.join(" | ")
+        })
+    }
+}
+
+#[cfg(feature = "test-support")]
+struct VocabularyFactory;
+
+#[cfg(feature = "test-support")]
+impl sv::daemon::TranscriberFactory for VocabularyFactory {
+    fn load(
+        &self,
+        _path: Option<&std::path::Path>,
+    ) -> Result<Box<dyn sv::daemon::Transcriber>, AppError> {
+        Ok(Box::new(VocabularyTranscriber::default()))
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn acknowledge(sender: &mpsc::Sender<ControlEvent>, event: ControlEvent) -> Result<(), String> {
+    let (reply, response) = mpsc::sync_channel(1);
+    sender
+        .send(ControlEvent::Request {
+            event: Box::new(event),
+            respond_to: reply,
+        })
+        .map_err(|e| e.to_string())?;
+    let result = response
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|e| e.to_string())?;
+    if result.ok {
+        Ok(())
+    } else {
+        Err(result.message.unwrap_or_default())
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn at17_vocabulary_files_reload_and_merge_without_restarting_daemon() -> Result<(), Box<dyn Error>>
+{
+    let directory = temp_dir("soundvibes-vocabulary");
+    let config = DaemonConfig {
+        vocabulary_dir: Some(directory.clone()),
+        ..daemon_config()
+    };
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::new(
+            vec!["Mic".to_string()],
+            vec![vec![0.2; 160]; 40],
+        )),
+        transcriber_factory: Box::new(VocabularyFactory),
+    };
+    let (sender, receiver) = mpsc::channel();
+    let controller = thread::spawn(move || -> Result<(), String> {
+        let utterance = || {
+            acknowledge(&sender, ControlEvent::StartRecording)?;
+            acknowledge(&sender, ControlEvent::StopRecording)
+        };
+        utterance()?; // Missing at startup.
+        fs::create_dir_all(directory.join("nested.txt")).map_err(|e| e.to_string())?;
+        fs::write(directory.join("b.txt"), "PostgreSQL\nada lovelace\n")
+            .map_err(|e| e.to_string())?;
+        fs::write(
+            directory.join("a.txt"),
+            " # names\n\n  SoundVibes \n Ada   Lovelace\n",
+        )
+        .map_err(|e| e.to_string())?;
+        fs::write(directory.join(".hidden.txt"), "hidden").map_err(|e| e.to_string())?;
+        fs::write(directory.join("b.txt.tmp"), "unfinished").map_err(|e| e.to_string())?;
+        fs::write(directory.join("nested.txt/child.txt"), "nested").map_err(|e| e.to_string())?;
+        utterance()?;
+        fs::write(directory.join("a.txt"), "soundvibes\nNeutrino\nC#\n")
+            .map_err(|e| e.to_string())?;
+        utterance()?;
+        fs::rename(directory.join("b.txt.tmp"), directory.join("b.txt"))
+            .map_err(|e| e.to_string())?;
+        utterance()?;
+        fs::remove_file(directory.join("a.txt")).map_err(|e| e.to_string())?;
+        utterance()?;
+        fs::remove_dir_all(&directory).map_err(|e| e.to_string())?;
+        utterance()?;
+        acknowledge(&sender, ControlEvent::Stop)
+    });
+    let mut output = TestOutput::default();
+    sv::daemon::run_daemon_loop(
+        &config,
+        &deps,
+        &mut output,
+        receiver,
+        &AtomicBool::new(false),
+    )?;
+    controller.join().map_err(|_| "controller panicked")??;
+    let transcripts: Vec<&str> = output
+        .stdout_lines()
+        .iter()
+        .filter(|line| line.starts_with("Transcript "))
+        .map(|line| line.split_once(": ").unwrap().1)
+        .collect();
+    assert_eq!(
+        transcripts,
+        [
+            "<empty>",
+            "SoundVibes | Ada Lovelace | PostgreSQL",
+            "soundvibes | Neutrino | C# | PostgreSQL | ada lovelace",
+            "soundvibes | Neutrino | C# | unfinished",
+            "unfinished",
+            "<empty>",
+        ]
+    );
+    assert!(
+        output.stderr_lines().is_empty(),
+        "{:?}",
+        output.stderr_lines()
+    );
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn at17a_bad_vocabulary_updates_keep_last_good_list_and_recover() -> Result<(), Box<dyn Error>> {
+    let directory = temp_dir("soundvibes-vocabulary-errors");
+    fs::create_dir_all(&directory)?;
+    fs::write(directory.join("app.txt"), "Quillon\n")?;
+    let config = DaemonConfig {
+        vocabulary_dir: Some(directory.clone()),
+        ..daemon_config()
+    };
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::new(
+            vec!["Mic".to_string()],
+            vec![vec![0.2; 160]; 40],
+        )),
+        transcriber_factory: Box::new(VocabularyFactory),
+    };
+    let (sender, receiver) = mpsc::channel();
+    let controller = thread::spawn(move || -> Result<(), String> {
+        let utterance = || {
+            acknowledge(&sender, ControlEvent::StartRecording)?;
+            acknowledge(&sender, ControlEvent::StopRecording)
+        };
+        utterance()?;
+        fs::write(directory.join("app.txt"), "Neutrino\n").map_err(|e| e.to_string())?;
+        fs::write(directory.join("z.txt"), [0xff]).map_err(|e| e.to_string())?;
+        utterance()?;
+        fs::write(directory.join("z.txt"), "bad\0term\n").map_err(|e| e.to_string())?;
+        utterance()?;
+        fs::remove_file(directory.join("z.txt")).map_err(|e| e.to_string())?;
+        utterance()?;
+        fs::remove_dir_all(&directory).map_err(|e| e.to_string())?;
+        fs::write(&directory, "not a directory").map_err(|e| e.to_string())?;
+        utterance()?;
+        fs::remove_file(&directory).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+        fs::write(directory.join("app.txt"), "Ada\n").map_err(|e| e.to_string())?;
+        utterance()?;
+        fs::remove_dir_all(directory).map_err(|e| e.to_string())?;
+        acknowledge(&sender, ControlEvent::Stop)
+    });
+    let mut output = TestOutput::default();
+    sv::daemon::run_daemon_loop(
+        &config,
+        &deps,
+        &mut output,
+        receiver,
+        &AtomicBool::new(false),
+    )?;
+    controller.join().map_err(|_| "controller panicked")??;
+    let transcripts: Vec<&str> = output
+        .stdout_lines()
+        .iter()
+        .filter(|line| line.starts_with("Transcript "))
+        .map(|line| line.split_once(": ").unwrap().1)
+        .collect();
+    assert_eq!(
+        transcripts,
+        ["Quillon", "Quillon", "Quillon", "Neutrino", "Neutrino", "Ada"]
+    );
+    assert_eq!(
+        output.stderr_lines().len(),
+        3,
+        "{:?}",
+        output.stderr_lines()
+    );
+    assert!(output
+        .stderr_lines()
+        .iter()
+        .all(|line| line.contains("keeping the previous vocabulary")));
+    Ok(())
+}
+
 #[test]
 fn at16_phonon2_rejects_unsupported_audio_configuration() -> Result<(), Box<dyn Error>> {
     let config_home = temp_dir("soundvibes-phonon2-config");
@@ -96,6 +304,12 @@ fn at16b_phonon2_real_model_transcribes_through_daemon_worker() -> Result<(), Bo
         return Ok(());
     };
     let library_dir = env::var_os("PHONON2_LIBRARY_DIR").ok_or("PHONON2_LIBRARY_DIR required")?;
+    let vocabulary_dir = temp_dir("soundvibes-phonon2-vocabulary");
+    fs::create_dir_all(&vocabulary_dir)?;
+    let terms = (0..26)
+        .map(|i| format!("ProjectTerm{i}\n"))
+        .collect::<String>();
+    fs::write(vocabulary_dir.join("app.txt"), terms)?;
     let mut reader = hound::WavReader::open("vendor/whisper.cpp/samples/jfk.wav")?;
     let samples: Vec<f32> = reader
         .samples::<i16>()
@@ -104,6 +318,7 @@ fn at16b_phonon2_real_model_transcribes_through_daemon_worker() -> Result<(), Bo
     let config = DaemonConfig {
         engine: sv::inference::InferenceEngine::Phonon2,
         phonon2_library_dir: Some(PathBuf::from(library_dir)),
+        vocabulary_dir: Some(vocabulary_dir.clone()),
         model_path: Some(PathBuf::from(model_dir)),
         vad: VadMode::Off,
         ..daemon_config()
@@ -122,6 +337,15 @@ fn at16b_phonon2_real_model_transcribes_through_daemon_worker() -> Result<(), Bo
         receiver,
         &AtomicBool::new(false),
     )?;
+    assert!(
+        output
+            .stderr_lines()
+            .iter()
+            .any(|line| line.contains("first 25 of 26 terms")),
+        "{:?}",
+        output.stderr_lines()
+    );
+    fs::remove_dir_all(vocabulary_dir)?;
     let expected = "ask not what your country can do for you";
     assert!(
         output

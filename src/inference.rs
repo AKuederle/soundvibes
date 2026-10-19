@@ -77,6 +77,11 @@ struct WhisperTranscriber {
 }
 
 impl Transcriber for WhisperTranscriber {
+    fn set_vocabulary(&mut self, words: &[String]) -> Result<Option<String>, AppError> {
+        self.context
+            .set_vocabulary(words)
+            .map_err(|err| AppError::runtime(err.to_string()))
+    }
     fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String, AppError> {
         self.context
             .transcribe(samples, language)
@@ -89,6 +94,20 @@ struct Phonon2Transcriber {
 }
 
 impl Transcriber for Phonon2Transcriber {
+    fn set_vocabulary(&mut self, words: &[String]) -> Result<Option<String>, AppError> {
+        let count = words.len().min(phonon2::MAX_HOTWORDS);
+        self.model
+            .lock()
+            .map_err(|_| AppError::runtime("Phonon-2 model lock poisoned"))?
+            .set_hotwords(&words[..count], 2.0)
+            .map_err(|err| AppError::runtime(format!("Phonon-2: {err}")))?;
+        Ok((count < words.len()).then(|| {
+            format!(
+                "vocabulary: Phonon-2 uses the first {count} of {} terms",
+                words.len()
+            )
+        }))
+    }
     fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String, AppError> {
         InferenceEngine::Phonon2.validate_input(16_000, language.unwrap_or("auto"))?;
         self.model

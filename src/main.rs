@@ -27,6 +27,10 @@ struct Cli {
     #[arg(long, value_name = "DIRECTORY", global = true)]
     phonon2_library_dir: Option<PathBuf>,
 
+    /// Directory of vocabulary .txt files, reloaded before each transcription.
+    #[arg(long, value_name = "DIRECTORY", global = true)]
+    vocabulary_dir: Option<PathBuf>,
+
     #[arg(
         long,
         value_name = "PATH",
@@ -256,6 +260,11 @@ impl Config {
             file.phonon2_library_dir,
         );
         let language = sources.value("language", cli.language, file.language);
+        let vocabulary_dir = sources
+            .optional("vocabulary_dir", cli.vocabulary_dir, file.vocabulary_dir)
+            .or_else(|| {
+                config_path().and_then(|path| path.parent().map(|p| p.join("vocabulary.d")))
+            });
         let model_size = sources.value("model_size", cli.model_size, file.model_size);
 
         let (model_language, model_language_explicit) =
@@ -360,6 +369,7 @@ impl Config {
             daemon: daemon::DaemonConfig {
                 engine,
                 phonon2_library_dir,
+                vocabulary_dir,
                 model_path,
                 download_model,
                 language,
@@ -392,6 +402,7 @@ impl Config {
 struct FileConfig {
     engine: Option<InferenceEngine>,
     phonon2_library_dir: Option<PathBuf>,
+    vocabulary_dir: Option<PathBuf>,
     model: Option<PathBuf>,
     model_path: Option<PathBuf>,
     model_size: Option<ModelSize>,
@@ -503,6 +514,9 @@ fn main() {
 
     println!("SoundVibes sv {}", env!("CARGO_PKG_VERSION"));
     println!("Engine: {:?}", config.daemon.engine);
+    if let Some(directory) = &config.daemon.vocabulary_dir {
+        println!("Vocabulary directory: {}", directory.display());
+    }
     if let Some(prepared) = &prepared_model {
         if prepared.downloaded {
             println!("Model download complete.");
@@ -837,6 +851,37 @@ mod tests {
 
         assert_eq!(config.model_size, ModelSize::LargeV3Turbo);
         assert_eq!(config.model_language, ModelLanguage::Auto);
+    }
+
+    #[test]
+    fn vocabulary_directory_defaults_and_cli_override_toml() {
+        let _lock = lock_tests();
+        let _guard = EnvGuard::set("XDG_CONFIG_HOME", std::path::Path::new("/test/config"));
+        for (args, text, expected) in [
+            (
+                vec!["sv", "daemon", "start"],
+                "",
+                "/test/config/soundvibes/vocabulary.d",
+            ),
+            (
+                vec!["sv", "daemon", "start"],
+                "vocabulary_dir = '/app/words'",
+                "/app/words",
+            ),
+            (
+                vec!["sv", "daemon", "start", "--vocabulary-dir", "/cli/words"],
+                "vocabulary_dir = '/app/words'",
+                "/cli/words",
+            ),
+        ] {
+            let matches = Cli::command().try_get_matches_from(args).expect("cli");
+            let config = Config::from_sources(
+                Cli::from_arg_matches(&matches).expect("cli"),
+                &matches,
+                toml::from_str(text).expect("config"),
+            );
+            assert_eq!(config.daemon.vocabulary_dir, Some(PathBuf::from(expected)));
+        }
     }
 
     #[test]

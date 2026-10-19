@@ -49,6 +49,55 @@ debug_transcripts = true
 
 The equivalent CLI flag is `--debug-transcripts`. Each completed transcript is written to stderr as one escaped line before output processing, so a systemd service records it in the journal. Inspect recent entries with `journalctl --user -u sv.service`. This mode logs dictated text in plain text and is disabled by default.
 
+### Custom vocabulary
+
+Create `$XDG_CONFIG_HOME/soundvibes/vocabulary.d`, or
+`~/.config/soundvibes/vocabulary.d` when `XDG_CONFIG_HOME` is unset. Each application
+can manage its own UTF-8 `.txt` file in that directory, with one word or phrase per
+line. For example, `projects.txt` could contain:
+
+```text
+# Project and product names
+SoundVibes
+PostgreSQL
+Ada Lovelace
+```
+
+The daemon combines the files before every transcription, including segments
+produced while the recording key stays held. Add, edit, replace, or delete files
+while it runs; the next segment uses the updated list without restarting or
+reloading the model. A missing directory is empty and can be created later.
+
+Files are read in filename order and lines in file order. Duplicate terms are
+matched without case, with the first spelling retained. Blank lines and lines
+starting with `#` are ignored; spaces inside phrases are normalized. `C#` is a
+valid term. Only regular, visible `.txt` files directly in the directory are read.
+Subdirectories, symlinks and temporary files such as `projects.txt.tmp` are ignored.
+
+Write to a temporary file and rename it over your application's `.txt` file to
+publish a complete update. An unreadable file, invalid UTF-8 or a NUL byte causes
+a warning; dictation continues with the previous complete list until reading
+succeeds again. Deleting all files or the directory clears the vocabulary.
+
+Override the directory with `--vocabulary-dir /absolute/path` or a root TOML key:
+
+```toml
+vocabulary_dir = "/home/you/vocabulary.d"
+```
+
+The CLI overrides TOML. Changing the directory setting requires a daemon restart;
+changing files inside it does not.
+
+Whisper uses vocabulary as a text prompt. It keeps the first tokens that fit its
+prompt budget, typically 223 tokens. Phonon-2 uses native hotword bias at strength
+2.0 and accepts the first 25 distinct terms. Both engines warn when the combined
+list exceeds their capacity. Use filename and line order to put priority terms
+first. Vocabulary guides recognition; it does not guarantee a particular spelling.
+
+For Phonon-2, rerun `scripts/prepare-phonon2.py` with the documented dependencies
+to install the pinned 0.2.11 native libraries. Existing 0.2.6 libraries do not have
+the required hotword API. The model weights are unchanged.
+
 ### Universal terminal paste and safe low-delay typing
 
 Most graphical applications accept `Shift+Insert` as a clipboard paste shortcut. Konsole supports it by default, while Ghostty needs an explicit binding so it uses the regular clipboard instead of the selection clipboard. Configure SoundVibes and Ghostty together with:

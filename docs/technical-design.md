@@ -77,12 +77,20 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Attempt GPU acceleration automatically; fall back to CPU when no supported GPU backend is detected.
 
 - `engine = "phonon2"` selects the dedicated `crates/phonon2` Rust abstraction.
-- Use the original model container and native ABI 1 encoder/TDT libraries from fermion-research 0.2.6, pinned by SHA256.
+- Use the original model container and fermion-research 0.2.11 native libraries, pinned by SHA256. The encoder uses ABI 1 and the TDT decoder ABI 3.
 - The crate owns model weights and handles, computes the CPU log-mel front end, applies the encoder projection, and renders vocabulary tokens. It requires no Python runtime.
 - Phonon-2 is English only and accepts 16 kHz mono PCM. Validate configuration before model loading or capture.
 - Native calls are serialized across models. Initialize native thread pools once and retain libraries for process lifetime; model handles and weights are freed on drop.
 - Prepare Phonon-2 assets separately with `scripts/prepare-phonon2.py`. `model` identifies the unpacked directory, and native libraries default to its `native` subdirectory, with `phonon2_library_dir` as an override.
 - Restart to switch engines. A Phonon-2 daemon rejects the Whisper-size `set-model` command before altering recording or worker state.
+
+### Live vocabulary
+- `vocabulary_dir` / `--vocabulary-dir` defaults to `vocabulary.d` beside `config.toml`. CLI values override TOML.
+- The background worker reads visible regular `.txt` files directly in the directory before each decode. It merges in filename/line order, normalizes phrase whitespace, ignores blank/comment lines, and deduplicates without case while retaining the first spelling.
+- Additions, edits, atomic replacements and removals affect the next segment without model reload. Producers should write a temporary file then rename it to `.txt` to publish complete updates. A missing directory means no hints.
+- Failed reads, invalid UTF-8 and NUL bytes retain the last complete snapshot with a warning. Worker model reloads preserve that snapshot. Directory access runs outside the recording/control loop.
+- Whisper tokenizes the merged list and keeps the first `n_text_ctx / 2 - 1` tokens, with an explicit capacity warning. The C++ shim sets prompt tokens, carries them across decode windows, and clears prior decode context so removed vocabulary cannot persist.
+- Phonon-2 compiles the first 25 terms into the upstream sparse word-piece automaton, with a capacity warning for excess terms. The model caches unchanged tables, uses strength 2.0, and disarms native borrowed pointers after each decode. Clearing the list restores unbiased decoding.
 
 ### Model Download
 - On `sv`/`sv daemon start` startup, check for the configured model in the default data directory.
@@ -107,7 +115,7 @@ This document describes the technical design for the `sv` CLI that performs offl
 
 ## Configuration
 - Format: TOML.
-- Example fields: `engine`, `phonon2_library_dir`, `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
+- Example fields: `engine`, `phonon2_library_dir`, `vocabulary_dir`, `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
 
 ## Data Flow
 1. CLI loads config and model.

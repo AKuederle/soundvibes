@@ -8,7 +8,9 @@ extern "C" int sv_whisper_full_configured(
     int n_samples,
     const char * language,
     bool detect_language,
-    int n_threads
+    int n_threads,
+    const whisper_token * prompt_tokens,
+    int prompt_n_tokens
 ) {
     whisper_full_params params =
         whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
@@ -21,6 +23,10 @@ extern "C" int sv_whisper_full_configured(
     params.n_threads = n_threads;
     params.language = language;
     params.detect_language = detect_language;
+    params.no_context = true;
+    params.carry_initial_prompt = true;
+    params.prompt_tokens = prompt_tokens;
+    params.prompt_n_tokens = prompt_n_tokens;
 
     return whisper_full(ctx, params, samples, n_samples);
 }

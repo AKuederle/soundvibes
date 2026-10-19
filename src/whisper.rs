@@ -29,12 +29,16 @@ unsafe extern "C" {
         language: *const c_char,
         detect_language: bool,
         n_threads: c_int,
+        prompt_tokens: *const whisper_token,
+        prompt_n_tokens: c_int,
     ) -> c_int;
 }
 
 #[derive(Debug)]
 pub enum WhisperError {
     InvalidPath(NulError),
+    InvalidVocabulary(NulError),
+    TokenizationFailed,
     InitFailed,
     TranscriptionFailed(i32),
 }
@@ -117,6 +121,8 @@ impl std::fmt::Display for WhisperError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WhisperError::InvalidPath(error) => write!(f, "invalid model path: {error}"),
+            WhisperError::InvalidVocabulary(error) => write!(f, "invalid vocabulary: {error}"),
+            WhisperError::TokenizationFailed => write!(f, "failed to tokenize vocabulary"),
             WhisperError::InitFailed => write!(f, "failed to initialize whisper context"),
             WhisperError::TranscriptionFailed(code) => {
                 write!(f, "whisper transcription failed with code {code}")
@@ -128,7 +134,9 @@ impl std::fmt::Display for WhisperError {
 impl std::error::Error for WhisperError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            WhisperError::InvalidPath(error) => Some(error),
+            WhisperError::InvalidPath(error) | WhisperError::InvalidVocabulary(error) => {
+                Some(error)
+            }
             _ => None,
         }
     }
@@ -136,6 +144,7 @@ impl std::error::Error for WhisperError {
 
 pub struct WhisperContext {
     ctx: NonNull<whisper_context>,
+    prompt: Vec<whisper_token>,
 }
 
 unsafe impl Send for WhisperContext {}
@@ -160,7 +169,42 @@ impl WhisperContext {
         let ctx = unsafe { whisper_init_from_file_with_params(path_c.as_ptr(), params) };
         let ctx = NonNull::new(ctx).ok_or(WhisperError::InitFailed)?;
         eprintln!("{}", log_capture.summary());
-        Ok(Self { ctx })
+        Ok(Self {
+            ctx,
+            prompt: Vec::new(),
+        })
+    }
+
+    /// Use the first prompt tokens that fit; clear all hints with an empty list.
+    pub fn set_vocabulary(&mut self, words: &[String]) -> Result<Option<String>, WhisperError> {
+        let text = CString::new(words.join(", ")).map_err(WhisperError::InvalidVocabulary)?;
+        // Each token consumes at least one input byte. This avoids the native
+        // tokenizer's error log for a deliberately undersized sizing query.
+        let mut tokens = vec![0; text.as_bytes().len()];
+        // SAFETY: live context, NUL-terminated text, and byte-sized token capacity.
+        let count = unsafe {
+            whisper_tokenize(
+                self.ctx.as_ptr(),
+                text.as_ptr(),
+                tokens.as_mut_ptr(),
+                tokens.len() as c_int,
+            )
+        };
+        if count < 0 {
+            return Err(WhisperError::TokenizationFailed);
+        }
+        tokens.truncate(count as usize);
+        // carry_initial_prompt reserves one token inside half the text context.
+        let capacity = (unsafe { whisper_n_text_ctx(self.ctx.as_ptr()) } / 2 - 1).max(1) as usize;
+        let warning = (tokens.len() > capacity).then(|| {
+            format!(
+                "vocabulary: Whisper uses the first {capacity} of {} prompt tokens",
+                tokens.len()
+            )
+        });
+        tokens.truncate(capacity);
+        self.prompt = tokens;
+        Ok(warning)
     }
 
     pub fn transcribe(
@@ -188,6 +232,12 @@ impl WhisperContext {
                 language_ptr,
                 detect_language,
                 n_threads,
+                if self.prompt.is_empty() {
+                    std::ptr::null()
+                } else {
+                    self.prompt.as_ptr()
+                },
+                self.prompt.len() as c_int,
             )
         };
         if result != 0 {

@@ -162,3 +162,21 @@ These tests validate the product behavior for the offline Linux CLI.
 - Action: issue `set-model` during an active Phonon-2 recording.
 - Expect: acknowledged error explaining the command applies to Whisper. The recording continues and emits its transcript when stopped.
 - Automated: `at16c_phonon2_rejects_whisper_reload_without_interrupting_recording` with `test-support`.
+
+### AT-17: Live vocabulary files from multiple applications
+- Setup: configure `vocabulary_dir` or `--vocabulary-dir`; by default use `$XDG_CONFIG_HOME/soundvibes/vocabulary.d` or `~/.config/soundvibes/vocabulary.d`.
+- Action: while the same daemon runs, create the directory, add and edit per-app `.txt` files, atomically replace a file, delete a file, and delete the directory.
+- Expect: the next transcription uses the current combined list. Filename and line order determine priority; deduplication ignores case and retains the first spelling. Whitespace, blank lines and comment lines are handled; `C#` remains a term. Hidden files, temporary files and subdirectories do not contribute terms.
+- Automated: `at17_vocabulary_files_reload_and_merge_without_restarting_daemon` in `tests/acceptance.rs` with `test-support`. No hardware or model files required.
+- CLI/TOML precedence and the XDG default are covered by `vocabulary_directory_defaults_and_cli_override_toml` in `src/main.rs`.
+
+### AT-17a: Vocabulary errors preserve dictation
+- Action: after loading a valid list, introduce invalid UTF-8 or NUL bytes, or replace the directory with a file. Then restore a valid directory and list.
+- Expect: each failed read warns and preserves the entire previous list, including when earlier files in a scan changed. Dictation continues; the next successful scan applies the current files.
+- Automated: `at17a_bad_vocabulary_updates_keep_last_good_list_and_recover` with `test-support`.
+
+### AT-17b: Real engine vocabulary and capacity
+- Action: transcribe the bundled JFK audio with vocabulary, then clear it. Supply an oversized list.
+- Expect: Whisper accepts hints, reports its prompt-token capacity, and clearing removes prompt history. Phonon-2 uses native bias, clearing restores the baseline, and a 26-term directory reports that the first 25 terms are used.
+- Automated: `at16b_phonon2_real_model_transcribes_through_daemon_worker` in `tests/acceptance.rs` verifies directory-to-engine delivery and its capacity warning. `transcribes_sample_audio` in `tests/whisper_integration.rs` verifies Whisper hints/capacity/clearing. `transcribes_real_audio_without_python` in `crates/phonon2/tests/transcription.rs` verifies native bias, clearing and zero strength.
+- Missing external model inputs skip ordinary runs. Configure `SV_MODEL_PATH`, `PHONON2_MODEL_DIR` and `PHONON2_LIBRARY_DIR` to exercise real engines. The Phonon-2 libraries must be the pinned 0.2.11 version. Live microphone and Arm hardware are outside these automated checks.

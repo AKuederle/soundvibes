@@ -36,13 +36,29 @@ fn transcribes_sample_audio() -> Result<(), Box<dyn Error>> {
     }
 
     let samples = load_wav_samples(sample_path)?;
-    let context = WhisperContext::from_file(model_path)?;
+    let mut context = WhisperContext::from_file(model_path)?;
     let transcript = context.transcribe(&samples, Some("en"))?;
     let normalized = transcript.to_lowercase();
     let expected = "ask not what your country can do for you";
     assert!(
         normalized.contains(expected),
         "expected transcript to include '{expected}', got '{transcript}'"
+    );
+    assert!(context
+        .set_vocabulary(&["Americans".into(), "country".into()])?
+        .is_none());
+    let hinted = context.transcribe(&samples, Some("en"))?;
+    assert!(hinted.to_lowercase().contains(expected), "{hinted}");
+    let warning = context.set_vocabulary(&vec!["country".to_string(); 300])?;
+    assert!(warning
+        .as_deref()
+        .is_some_and(|warning| warning.contains("prompt tokens")));
+    assert!(!context.transcribe(&samples, Some("en"))?.is_empty());
+    assert!(context.set_vocabulary(&[])?.is_none());
+    assert_eq!(
+        context.transcribe(&samples, Some("en"))?,
+        transcript,
+        "clearing the vocabulary must remove prompt history"
     );
     Ok(())
 }

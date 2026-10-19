@@ -31,6 +31,7 @@ use crate::types::{AudioHost, OutputFormat, VadMode};
 pub struct DaemonConfig {
     pub engine: InferenceEngine,
     pub phonon2_library_dir: Option<PathBuf>,
+    pub vocabulary_dir: Option<PathBuf>,
     pub model_path: Option<PathBuf>,
     pub download_model: bool,
     pub language: String,
@@ -302,7 +303,7 @@ pub fn run_daemon_loop(
     let transcriber = deps
         .transcriber_factory
         .load(config.model_path.as_deref())?;
-    let mut worker = TranscriptionWorker::start(transcriber);
+    let mut worker = TranscriptionWorker::start(transcriber, config.vocabulary_dir.clone());
 
     let vad = audio::VadConfig::new(
         config.vad == VadMode::On || config.vad == VadMode::Continuous,
@@ -621,6 +622,9 @@ fn emit_worker_result(
     result: TranscriptionResult,
     last_emitted_transcript: &mut String,
 ) {
+    for warning in &result.warnings {
+        output.stderr(&format!("warn: {warning}"));
+    }
     match result.transcript {
         Ok(transcript) => {
             let text = if result.had_overlap && !last_emitted_transcript.trim().is_empty() {
@@ -1070,6 +1074,7 @@ pub mod test_support {
         DaemonConfig {
             engine: crate::inference::InferenceEngine::Whisper,
             phonon2_library_dir: None,
+            vocabulary_dir: None,
             model_path: None,
             download_model: false,
             language: "en".to_string(),
@@ -1231,6 +1236,10 @@ pub mod test_support {
     }
 
     impl Transcriber for TestTranscriber {
+        fn set_vocabulary(&mut self, _words: &[String]) -> Result<Option<String>, AppError> {
+            Ok(None)
+        }
+
         fn transcribe(
             &self,
             _samples: &[f32],
@@ -1697,6 +1706,10 @@ mod tests {
     }
 
     impl Transcriber for ReloadFailTranscriber {
+        fn set_vocabulary(&mut self, _words: &[String]) -> Result<Option<String>, AppError> {
+            Ok(None)
+        }
+
         fn transcribe(
             &self,
             _samples: &[f32],

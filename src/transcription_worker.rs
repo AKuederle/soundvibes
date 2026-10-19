@@ -1,9 +1,14 @@
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use crate::error::AppError;
+use crate::vocabulary::Vocabulary;
 
 pub trait Transcriber: Send {
+    /// Set the next decode's vocabulary, returning a capacity warning if needed.
+    /// On error, retain the previous setting so dictation can continue.
+    fn set_vocabulary(&mut self, words: &[String]) -> Result<Option<String>, AppError>;
     fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String, AppError>;
 }
 
@@ -19,10 +24,12 @@ pub struct TranscriptionResult {
     pub duration_ms: u64,
     pub transcript: Result<String, AppError>,
     pub had_overlap: bool,
+    pub warnings: Vec<String>,
 }
 
 enum WorkerCommand {
     Transcribe { index: u64, job: TranscriptionJob },
+    Reload(Box<dyn Transcriber>),
     Shutdown,
 }
 
@@ -35,14 +42,23 @@ pub struct TranscriptionWorker {
 }
 
 impl TranscriptionWorker {
-    pub fn start(transcriber: Box<dyn Transcriber>) -> Self {
+    pub fn start(mut transcriber: Box<dyn Transcriber>, vocabulary_dir: Option<PathBuf>) -> Self {
         let (job_sender, job_receiver) = mpsc::channel();
         let (result_sender, result_receiver) = mpsc::channel();
 
         let handle = thread::spawn(move || {
+            let mut vocabulary = Vocabulary::new(vocabulary_dir);
             while let Ok(command) = job_receiver.recv() {
                 match command {
                     WorkerCommand::Transcribe { index, job } => {
+                        let (words, warning) = vocabulary.refresh();
+                        let mut warnings: Vec<String> = warning.into_iter().collect();
+                        match transcriber.set_vocabulary(words) {
+                            Ok(warning) => warnings.extend(warning),
+                            Err(error) => warnings.push(format!(
+                                "vocabulary: {error}; keeping the previous vocabulary"
+                            )),
+                        }
                         let transcript =
                             transcriber.transcribe(&job.samples, job.language.as_deref());
                         let result = TranscriptionResult {
@@ -50,11 +66,13 @@ impl TranscriptionWorker {
                             duration_ms: job.duration_ms,
                             transcript,
                             had_overlap: job.had_overlap,
+                            warnings,
                         };
                         if result_sender.send(result).is_err() {
                             break;
                         }
                     }
+                    WorkerCommand::Reload(next) => transcriber = next,
                     WorkerCommand::Shutdown => break,
                 }
             }
@@ -101,11 +119,9 @@ impl TranscriptionWorker {
                 "cannot reload transcriber while transcription is pending",
             ));
         }
-        let next_index = self.next_index;
-        self.shutdown()?;
-        *self = Self::start(transcriber);
-        self.next_index = next_index;
-        Ok(())
+        self.jobs
+            .send(WorkerCommand::Reload(transcriber))
+            .map_err(|err| AppError::runtime(format!("transcription worker stopped: {err}")))
     }
 
     pub fn shutdown(&mut self) -> Result<(), AppError> {
@@ -140,6 +156,10 @@ mod tests {
     }
 
     impl Transcriber for BlockingTranscriber {
+        fn set_vocabulary(&mut self, _words: &[String]) -> Result<Option<String>, AppError> {
+            Ok(None)
+        }
+
         fn transcribe(
             &self,
             _samples: &[f32],
@@ -155,10 +175,13 @@ mod tests {
     fn submit_returns_while_transcription_runs_in_background() {
         let (started_sender, started_receiver) = mpsc::channel();
         let (release_sender, release_receiver) = mpsc::channel();
-        let mut worker = TranscriptionWorker::start(Box::new(BlockingTranscriber {
-            started: started_sender,
-            release: release_receiver,
-        }));
+        let mut worker = TranscriptionWorker::start(
+            Box::new(BlockingTranscriber {
+                started: started_sender,
+                release: release_receiver,
+            }),
+            None,
+        );
 
         worker
             .submit(TranscriptionJob {
@@ -192,6 +215,10 @@ mod tests {
     }
 
     impl Transcriber for LanguageProbeTranscriber {
+        fn set_vocabulary(&mut self, _words: &[String]) -> Result<Option<String>, AppError> {
+            Ok(None)
+        }
+
         fn transcribe(&self, _samples: &[f32], language: Option<&str>) -> Result<String, AppError> {
             self.seen_language
                 .send(language.map(str::to_string))
@@ -203,9 +230,12 @@ mod tests {
     #[test]
     fn worker_preserves_automatic_language_detection() {
         let (language_sender, language_receiver) = mpsc::channel();
-        let mut worker = TranscriptionWorker::start(Box::new(LanguageProbeTranscriber {
-            seen_language: language_sender,
-        }));
+        let mut worker = TranscriptionWorker::start(
+            Box::new(LanguageProbeTranscriber {
+                seen_language: language_sender,
+            }),
+            None,
+        );
 
         worker
             .submit(TranscriptionJob {
@@ -228,6 +258,10 @@ mod tests {
     struct SampleTranscriber;
 
     impl Transcriber for SampleTranscriber {
+        fn set_vocabulary(&mut self, _words: &[String]) -> Result<Option<String>, AppError> {
+            Ok(None)
+        }
+
         fn transcribe(&self, samples: &[f32], _language: Option<&str>) -> Result<String, AppError> {
             Ok(samples.first().copied().unwrap_or_default().to_string())
         }
@@ -235,7 +269,7 @@ mod tests {
 
     #[test]
     fn worker_owns_fifo_sequence_and_pending_state() {
-        let mut worker = TranscriptionWorker::start(Box::new(SampleTranscriber));
+        let mut worker = TranscriptionWorker::start(Box::new(SampleTranscriber), None);
         for sample in [1.0, 2.0] {
             worker
                 .submit(TranscriptionJob {
@@ -261,7 +295,7 @@ mod tests {
 
     #[test]
     fn worker_preserves_sequence_when_transcriber_is_reloaded() {
-        let mut worker = TranscriptionWorker::start(Box::new(SampleTranscriber));
+        let mut worker = TranscriptionWorker::start(Box::new(SampleTranscriber), None);
         worker
             .submit(TranscriptionJob {
                 samples: vec![1.0],

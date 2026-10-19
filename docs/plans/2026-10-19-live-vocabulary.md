@@ -8,8 +8,6 @@ must consume the vocabulary while inference remains offline.
 Base: `1f93cd19d6033686b35b540c200aa9930370721e` on clean `main`.
 Follow `AGENTS.md`, `.agents/refactor-policy.md`, and `docs/acceptance-tests.md`.
 
-COMPACTION CONTINUITY: Re-read implement-code-change and the task-defining artifacts before continuing after compaction or session restoration.
-
 Review units and gates:
 
 1. Add Phonon-2 hotwords through the pinned fermion-research 0.2.11 encoder ABI 1
@@ -33,7 +31,7 @@ Acceptance checklist:
 - [x] Whisper receives vocabulary as a prompt; Phonon-2 receives native hotwords.
 - [x] Engine capacity limits are documented and reported rather than silently hidden.
 - [x] Acceptance tests in `tests/acceptance.rs` map to `docs/acceptance-tests.md`.
-- [ ] Format, lint, tests, release build, reviews, commits and remote push complete.
+- [x] Format, lint, tests, release build, reviews, commits and remote push complete.
 
 Verification record:
 
@@ -58,4 +56,27 @@ Verification record:
 - Workspace all-target/all-feature Clippy passed. The real Phonon-2 daemon test
   passed in release mode, including delivery from a 26-term directory and a visible
   25-term capacity warning. Full workspace tests with both model paths configured
-  and the release workspace build are in progress.
+  and the release workspace build passed.
+
+Final delivery:
+
+- Implementation commits `bcbf84c` and `9e66878` were pushed to `origin/main`.
+  Git confirmed the branch was up to date and the worktree clean.
+- Whole-stack RoboRev review 15800 passed with no actionable findings and is
+  closed. Reviewed base: `1f93cd19d6033686b35b540c200aa9930370721e`.
+  Reviewed head: `9e6687857c9283488f324f58b6d90d5efa00ec76`.
+  No implementation corrections followed final review. The two commits remain intact.
+- `cargo fmt --all --check`,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+  `cargo test --workspace --all-features`, and
+  `cargo build --workspace --release` passed. Real-model tests ran with
+  Whisper small.en on Vulkan and the Phonon-2 model with pinned 0.2.11 libraries.
+  The mapped-library setup regression also passed separately with cached assets.
+- No implementation work remains. Live microphone/keyboard and Arm hardware
+  were not exercised. Optional hardware tests skip when not explicitly enabled.
+- The running service and installed binaries/model assets were not changed.
+  Install the updated binary and restart once to load this feature; Phonon-2
+  also needs the updated setup script's native libraries. Later vocabulary-file
+  changes need no restart. Usage is documented in README.md and AT-17 through AT-17b.
+- No feature branch or pull request was requested. This final documentation
+  receipt is an additional normal commit after the reviewed head.

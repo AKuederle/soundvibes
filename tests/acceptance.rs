@@ -1488,3 +1488,50 @@ fn run_daemon_for_logs(
     let collected = stderr_lines.lock().expect("stderr lock").clone();
     Ok(collected)
 }
+
+// AT-38: explicit assets make missing/invalid models fail instead of silently skipping.
+#[test]
+fn parakeet_real_asset_offline() -> Result<(), Box<dyn Error>> {
+    let Some(model) = env::var_os("SV_PARAKEET_MODEL") else {
+        eprintln!("skip AT-38: set SV_PARAKEET_MODEL to a verified Unified EN GGUF");
+        return Ok(());
+    };
+    let helper = PathBuf::from(env!("CARGO_BIN_EXE_sv")).with_file_name("sv-parakeet");
+    let mut child = Command::new(helper)
+        .arg(model)
+        .arg(env::var("SV_PARAKEET_BACKEND").unwrap_or_else(|_| "cpu".into()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    assert!(
+        output.read_line(&mut line)? > 0,
+        "companion failed loading model"
+    );
+    let mut wav = hound::WavReader::open("vendor/whisper.cpp/samples/jfk.wav")?;
+    let samples: Vec<f32> = wav
+        .samples::<i16>()
+        .map(|s| s.map(|v| v as f32 / 32768.0))
+        .collect::<Result<_, _>>()?;
+    let mut input = child.stdin.take().unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"op":"offline", "samples":samples, "vocabulary":["TanStack", "shadcn"]})
+    )?;
+    line.clear();
+    output.read_line(&mut line)?;
+    let reply: serde_json::Value = serde_json::from_str(&line)?;
+    let text = reply["text"]
+        .as_str()
+        .expect("successful offline transcript")
+        .to_lowercase();
+    assert!(
+        text.contains("country") && text.contains("americans"),
+        "{text}"
+    );
+    drop(input);
+    assert!(child.wait()?.success());
+    Ok(())
+}

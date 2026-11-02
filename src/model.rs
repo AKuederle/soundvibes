@@ -217,6 +217,18 @@ fn download_model(path: &Path, spec: &ModelSpec) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Use the separately prepared, checksum-verified Parakeet asset.
+pub fn prepare_parakeet_model(explicit_path: Option<&Path>) -> Result<PreparedModel, AppError> {
+    let path = explicit_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_model_dir().join("parakeet-unified-en-0.6b-Q8_0.gguf"));
+    validate_model_path(&path).map_err(|_| AppError::config(format!("Parakeet model missing at {}; run scripts/prepare-parakeet.py or set --model to an existing GGUF", path.display())))?;
+    Ok(PreparedModel {
+        path,
+        downloaded: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1517,6 +1517,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sv-parakeet"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "transcribe-cpp",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.114"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1664,6 +1672,25 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "transcribe-cpp"
+version = "0.4.1"
+source = "git+https://github.com/anomalyco/transcribe.cpp?rev=7045d1c0fe7cee37747b2792977421d435e75fca#7045d1c0fe7cee37747b2792977421d435e75fca"
+dependencies = [
+ "log",
+ "thiserror 2.0.18",
+ "transcribe-cpp-sys",
+]
+
+[[package]]
+name = "transcribe-cpp-sys"
+version = "0.4.1"
+source = "git+https://github.com/anomalyco/transcribe.cpp?rev=7045d1c0fe7cee37747b2792977421d435e75fca#7045d1c0fe7cee37747b2792977421d435e75fca"
+dependencies = [
+ "cmake",
+ "serde_json",
+]
 
 [[package]]
 name = "transpose"

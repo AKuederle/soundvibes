@@ -198,3 +198,5 @@ Focused commands and hardware-test flags are documented in `AGENTS.md` and `docs
 ## License
 
 GNU General Public License v3.0; see `LICENSE`.
+
+Parakeet Unified English 0.6B setup and local streaming: [docs/parakeet.md](docs/parakeet.md).

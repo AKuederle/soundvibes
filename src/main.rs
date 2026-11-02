@@ -24,6 +24,9 @@ struct Cli {
     #[arg(long, default_value = "whisper", global = true)]
     engine: InferenceEngine,
 
+    #[arg(long, default_value = "auto", global = true)]
+    parakeet_backend: sv::parakeet::ParakeetBackend,
+
     #[arg(long, value_name = "DIRECTORY", global = true)]
     phonon2_library_dir: Option<PathBuf>,
 
@@ -35,7 +38,7 @@ struct Cli {
         long,
         value_name = "PATH",
         global = true,
-        help = "Whisper model file or unpacked Phonon-2 directory"
+        help = "Whisper file, Parakeet GGUF file, or unpacked Phonon-2 directory"
     )]
     model: Option<PathBuf>,
 
@@ -368,6 +371,11 @@ impl Config {
             model_language,
             daemon: daemon::DaemonConfig {
                 engine,
+                parakeet_backend: sources.value(
+                    "parakeet_backend",
+                    cli.parakeet_backend,
+                    file.parakeet_backend,
+                ),
                 phonon2_library_dir,
                 vocabulary_dir,
                 model_path,
@@ -401,6 +409,7 @@ impl Config {
 #[serde(default)]
 struct FileConfig {
     engine: Option<InferenceEngine>,
+    parakeet_backend: Option<sv::parakeet::ParakeetBackend>,
     phonon2_library_dir: Option<PathBuf>,
     vocabulary_dir: Option<PathBuf>,
     model: Option<PathBuf>,
@@ -497,6 +506,9 @@ fn main() {
                 &spec,
                 config.daemon.download_model,
             ),
+            InferenceEngine::Parakeet => {
+                sv::model::prepare_parakeet_model(config.daemon.model_path.as_deref())
+            }
             InferenceEngine::Phonon2 => {
                 sv::model::prepare_phonon2_model(config.daemon.model_path.as_deref())
             }
@@ -713,6 +725,16 @@ mod tests {
     }
 
     #[test]
+    fn parakeet_engine_accepts_english_and_rejects_wrong_audio() {
+        let cli = Cli::try_parse_from(["sv", "--engine", "parakeet"]).unwrap();
+        assert!(cli.engine.validate_input(16_000, "en").is_ok());
+        assert!(cli.engine.validate_input(48_000, "en").is_err());
+        assert!(cli.engine.validate_input(16_000, "de").is_err());
+        let file: FileConfig = toml::from_str("engine = 'parakeet'").unwrap();
+        assert_eq!(file.engine, Some(cli.engine));
+    }
+
+    #[test]
     fn record_start_command_reaches_daemon_socket() -> Result<(), AppError> {
         let _lock = lock_tests();
         let runtime_dir = temp_runtime_dir();
@@ -881,6 +903,29 @@ mod tests {
                 toml::from_str(text).expect("config"),
             );
             assert_eq!(config.daemon.vocabulary_dir, Some(PathBuf::from(expected)));
+        }
+    }
+
+    #[test]
+    fn parakeet_backend_cli_overrides_toml() {
+        for (args, expected) in [
+            (vec!["sv"], sv::parakeet::ParakeetBackend::Cpu),
+            (
+                vec!["sv", "--parakeet-backend", "vulkan"],
+                sv::parakeet::ParakeetBackend::Vulkan,
+            ),
+        ] {
+            let matches = Cli::command().try_get_matches_from(args).unwrap();
+            let config = Config::from_sources(
+                Cli::from_arg_matches(&matches).unwrap(),
+                &matches,
+                toml::from_str(
+                    "engine = 'parakeet'\nparakeet_backend = 'cpu'\nmodel = '/model.gguf'",
+                )
+                .unwrap(),
+            );
+            assert_eq!(config.daemon.parakeet_backend, expected);
+            assert_eq!(config.daemon.model_path, Some(PathBuf::from("/model.gguf")));
         }
     }
 

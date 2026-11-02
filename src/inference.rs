@@ -16,17 +16,20 @@ pub enum InferenceEngine {
     Whisper,
     #[value(name = "phonon2")]
     Phonon2,
+    Parakeet,
 }
 
 impl InferenceEngine {
     pub fn validate_input(self, sample_rate: u32, language: &str) -> Result<(), AppError> {
-        if self == Self::Phonon2 {
+        if matches!(self, Self::Phonon2 | Self::Parakeet) {
             if sample_rate != 16_000 {
-                return Err(AppError::config("Phonon-2 requires 16000 Hz mono audio"));
+                return Err(AppError::config(
+                    "English engines require 16000 Hz mono audio",
+                ));
             }
             if !language.eq_ignore_ascii_case("en") && !language.eq_ignore_ascii_case("auto") {
                 return Err(AppError::config(
-                    "Phonon-2 supports English only; use language = \"en\" or \"auto\"",
+                    "This engine supports English only; use language = \"en\" or \"auto\"",
                 ));
             }
         }
@@ -37,12 +40,18 @@ impl InferenceEngine {
 pub struct InferenceFactory {
     engine: InferenceEngine,
     phonon2_library_dir: Option<PathBuf>,
+    parakeet_backend: crate::parakeet::ParakeetBackend,
 }
 
 impl InferenceFactory {
-    pub fn new(engine: InferenceEngine, phonon2_library_dir: Option<PathBuf>) -> Self {
+    pub fn new(
+        engine: InferenceEngine,
+        phonon2_library_dir: Option<PathBuf>,
+        parakeet_backend: crate::parakeet::ParakeetBackend,
+    ) -> Self {
         Self {
             engine,
+            parakeet_backend,
             phonon2_library_dir,
         }
     }
@@ -52,6 +61,10 @@ impl TranscriberFactory for InferenceFactory {
     fn load(&self, model_path: Option<&Path>) -> Result<Box<dyn Transcriber>, AppError> {
         let model_path = model_path.ok_or_else(|| AppError::config("model path is required"))?;
         match self.engine {
+            InferenceEngine::Parakeet => Ok(Box::new(crate::parakeet::ParakeetTranscriber::load(
+                model_path,
+                self.parakeet_backend,
+            )?)),
             InferenceEngine::Whisper => {
                 let context = WhisperContext::from_file(model_path)
                     .map_err(|err| AppError::runtime(err.to_string()))?;

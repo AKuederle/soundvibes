@@ -180,3 +180,11 @@ These tests validate the product behavior for the offline Linux CLI.
 - Expect: Whisper accepts hints, reports its prompt-token capacity, and clearing removes prompt history. Phonon-2 uses native bias, clearing restores the baseline, and a 26-term directory reports that the first 25 terms are used.
 - Automated: `at16b_phonon2_real_model_transcribes_through_daemon_worker` in `tests/acceptance.rs` verifies directory-to-engine delivery and its capacity warning. `transcribes_sample_audio` in `tests/whisper_integration.rs` verifies Whisper hints/capacity/clearing. `transcribes_real_audio_without_python` in `crates/phonon2/tests/transcription.rs` verifies native bias, clearing and zero strength.
 - Missing external model inputs skip ordinary runs. Configure `SV_MODEL_PATH`, `PHONON2_MODEL_DIR` and `PHONON2_LIBRARY_DIR` to exercise real engines. The Phonon-2 libraries must be the pinned 0.2.11 version. Live microphone and Arm hardware are outside these automated checks.
+
+### AT-38: Parakeet Unified EN offline recognition
+
+`parakeet_real_asset_offline` transcribes the JFK fixture through the persistent
+`sv-parakeet` companion with vocabulary terms. Build both workspace binaries first.
+Set `SV_PARAKEET_MODEL` to the verified Q8_0 GGUF to enable it; unset skips.
+An explicitly configured missing/invalid asset fails. `SV_PARAKEET_BACKEND=cpu`
+is the default for this test; set `vulkan` to exercise the GPU.

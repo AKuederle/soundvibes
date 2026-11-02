@@ -28,8 +28,12 @@ Tip: use `mise tasks` to list available workflows; most tasks can be identified 
 
 Mise tasks:
 - `mise run prepare-dev` (install build prerequisites for your distro)
-- `mise run run-local` (run `sv` locally)
+- `mise run run-local` (build both workspace binaries, then run `sv` locally)
 - `mise run ci` (format, lint, tests, release build)
+
+Parakeet preparation: `python3 scripts/prepare-parakeet.py` verifies the pinned model.
+Install/deploy `sv-parakeet` beside `sv`; `cargo build --workspace --release` builds both.
+See `docs/parakeet.md` for SPIRV-Headers and CPU-only build prerequisites.
 
 Tests (specific variants):
 - `cargo test` (all tests)

@@ -30,6 +30,7 @@ use crate::types::{AudioHost, OutputFormat, VadMode};
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub engine: InferenceEngine,
+    pub parakeet_backend: crate::parakeet::ParakeetBackend,
     pub phonon2_library_dir: Option<PathBuf>,
     pub vocabulary_dir: Option<PathBuf>,
     pub model_path: Option<PathBuf>,
@@ -106,6 +107,7 @@ impl DaemonDeps {
             transcriber_factory: Box::new(InferenceFactory::new(
                 config.engine,
                 config.phonon2_library_dir.clone(),
+                config.parakeet_backend,
             )),
         })
     }
@@ -535,8 +537,8 @@ fn reload_model(
     output: &mut dyn DaemonOutput,
     last_emitted_transcript: &mut String,
 ) -> Result<String, AppError> {
-    if config.engine == InferenceEngine::Phonon2 {
-        return Err(AppError::config("set-model changes Whisper sizes; restart the daemon to change the Phonon-2 engine or model directory"));
+    if config.engine != InferenceEngine::Whisper {
+        return Err(AppError::config("set-model changes Whisper sizes; restart the daemon to change the engine or model path"));
     }
     if recording.take().is_some() {
         output.stdout("Recording stopped for model reload.");
@@ -1073,6 +1075,7 @@ pub mod test_support {
     pub fn daemon_config() -> DaemonConfig {
         DaemonConfig {
             engine: crate::inference::InferenceEngine::Whisper,
+            parakeet_backend: Default::default(),
             phonon2_library_dir: None,
             vocabulary_dir: None,
             model_path: None,

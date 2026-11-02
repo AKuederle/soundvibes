@@ -1,4 +1,4 @@
-//! Persistent companion process isolates transcribe.cpp's ggml from Whisper's.
+//! Persistent local Parakeet backend process.
 use clap::ValueEnum;
 use serde::Deserialize;
 use serde_json::{json, Value};

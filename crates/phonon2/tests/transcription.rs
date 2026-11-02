@@ -33,8 +33,7 @@ fn transcribes_real_audio_without_python() -> Result<(), Box<dyn std::error::Err
     let library_dir =
         env::var_os("PHONON2_LIBRARY_DIR").ok_or("PHONON2_LIBRARY_DIR is required")?;
     let mut model = Model::load(Path::new(&model_dir), Path::new(&library_dir))?;
-    let audio =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/whisper.cpp/samples/jfk.wav");
+    let audio = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/jfk.wav");
     let mut reader = hound::WavReader::open(audio)?;
     assert_eq!(reader.spec().sample_rate, 16_000);
     assert_eq!(reader.spec().channels, 1);

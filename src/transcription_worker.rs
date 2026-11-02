@@ -43,7 +43,6 @@ enum WorkerCommand {
     Feed(Vec<f32>),
     Cancel,
     Transcribe { index: u64, job: TranscriptionJob },
-    Reload(Box<dyn Transcriber>),
     Shutdown,
 }
 
@@ -130,12 +129,6 @@ impl TranscriptionWorker {
                             break;
                         }
                     }
-                    WorkerCommand::Reload(next) => {
-                        transcriber.cancel_stream();
-                        transcriber = next;
-                        streaming = false;
-                        stream_warnings.clear();
-                    }
                     WorkerCommand::Shutdown => {
                         transcriber.cancel_stream();
                         break;
@@ -192,17 +185,6 @@ impl TranscriptionWorker {
 
     pub fn has_pending(&self) -> bool {
         self.pending > 0
-    }
-
-    pub fn reload(&mut self, transcriber: Box<dyn Transcriber>) -> Result<(), AppError> {
-        if self.has_pending() {
-            return Err(AppError::runtime(
-                "cannot reload transcriber while transcription is pending",
-            ));
-        }
-        self.jobs
-            .send(WorkerCommand::Reload(transcriber))
-            .map_err(|err| AppError::runtime(format!("transcription worker stopped: {err}")))
     }
 
     pub fn shutdown(&mut self) -> Result<(), AppError> {
@@ -563,33 +545,5 @@ mod tests {
         assert_eq!(second.index, 2);
         assert_eq!(second.transcript.expect("second transcript"), "2");
         assert!(!worker.has_pending());
-    }
-
-    #[test]
-    fn worker_preserves_sequence_when_transcriber_is_reloaded() {
-        let mut worker = TranscriptionWorker::start(Box::new(SampleTranscriber), None);
-        worker
-            .submit(TranscriptionJob {
-                samples: vec![1.0],
-                duration_ms: 1,
-                language: None,
-                had_overlap: false,
-            })
-            .expect("submit first job");
-        assert_eq!(worker.recv().expect("first result").index, 1);
-
-        worker
-            .reload(Box::new(SampleTranscriber))
-            .expect("reload transcriber");
-        worker
-            .submit(TranscriptionJob {
-                samples: vec![2.0],
-                duration_ms: 1,
-                language: None,
-                had_overlap: false,
-            })
-            .expect("submit second job");
-
-        assert_eq!(worker.recv().expect("second result").index, 2);
     }
 }

@@ -10,8 +10,6 @@ This PRD is a living document and should be updated as product requirements and 
 - Work fully offline with a small model and fast post-recording transcription.
 - Run as a background daemon that listens for a configured evdev hold key.
 - Use `sv daemon start` to run the service; holding the configured key records, releasing it stops and transcribes.
-- Ship the default Whisper path as a single Rust CLI binary plus an automatically downloaded model file. Optional Phonon-2 uses separately prepared model assets and native CPU libraries.
-- Automatically accelerate Whisper on NVIDIA/AMD GPUs when available, otherwise fall back to CPU. Phonon-2 runs on CPU.
 - Keep local and pull-request quality gates aligned behind one command.
 
 ## Target Users
@@ -21,7 +19,7 @@ This PRD is a living document and should be updated as product requirements and 
 ## Scope
 - CLI that captures audio from the default input device.
 - Start/stop recording: capture audio while the configured key is held, transcribe and print when released.
-- Small offline model (whisper.cpp small with quantization by default).
+- Parakeet Unified English 0.6B Q8_0 by default.
 - Automatic GPU backend selection for NVIDIA/AMD devices with CPU fallback.
 - Configuration via `config.toml` in the XDG config directory.
 - Works on Linux x86_64.
@@ -56,18 +54,17 @@ This PRD is a living document and should be updated as product requirements and 
 - Audio capture: `cpal` for mic input at 16 kHz mono.
 - Push-to-talk buffer: capture while the configured key is held, stop on release.
 - Optional VAD: trim trailing silence after release.
-- Inference: whisper.cpp via Rust FFI bindings with GPU acceleration when available, or the dedicated Phonon-2 Rust crate with native CPU libraries.
+- Inference: transcribe.cpp Parakeet with Vulkan/CPU inference, or the dedicated Phonon-2 Rust crate with native CPU libraries.
 - Output: final text output to stdout after transcription completes.
 - Control plane: daemon listens for evdev key events and keeps a local socket for lifecycle commands.
 - Text output: Wayland clipboard access through `wl-clipboard`, key input through `dotool`, and an explicit low-delay `ydotoold` mode.
 
 ## Model Choice
-- Default engine: whisper.cpp through FFI.
+- Default engine: Parakeet Unified English 0.6B.
 - Optional engine: Phonon-2, using the original Fermion Research weights and native CPU encoder/TDT decoder. English only, 16 kHz mono; no Python runtime dependency.
-- Optional Parakeet Unified EN 0.6B: transcribe.cpp companion with local Vulkan/CPU inference, live begin/feed/finalize, vocabulary bias and full-clip offline fallback. English only, 16 kHz mono. See [parakeet.md](parakeet.md).
-- Default model: small general (ggml).
-- Model is downloaded on demand to a default location and loaded locally.
-- Phonon-2 assets are prepared separately with a pinned setup script. Restart the daemon to change engines; Whisper size reloads are rejected while Phonon-2 or Parakeet is selected.
+- Parakeet Unified EN 0.6B: transcribe.cpp companion with local Vulkan/CPU inference, live begin/feed/finalize, vocabulary bias and full-clip offline fallback. English only, 16 kHz mono. See [parakeet.md](parakeet.md).
+- Default model: Parakeet Unified EN 0.6B Q8_0 GGUF.
+- Assets are prepared explicitly with pinned setup scripts and loaded locally.
 
 ## Performance Assumptions
 - Best-effort latency on CPU for a small model.
@@ -77,13 +74,13 @@ This PRD is a living document and should be updated as product requirements and 
 
 ## Local Installation
 - Build or install the Rust binary locally with Cargo.
-- Download the configured model to the default data directory on first use.
+- Prepare model assets before startup; missing assets report the setup command.
 
 ## Configuration
 - Load config from XDG base directory if available.
 - Default path: `$XDG_CONFIG_HOME/soundvibes/config.toml`, or `~/.config/soundvibes/config.toml` when the variable is unset.
 - Config file format: TOML.
-- Config keys: `engine`, `phonon2_library_dir`, `vocabulary_dir`, `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
+- Config keys: `engine`, `phonon2_library_dir`, `vocabulary_dir`, `model`, `model_path`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
 
 ## Validation Plan
 - Manual test on Linux laptop with default microphone.
@@ -97,6 +94,6 @@ This PRD is a living document and should be updated as product requirements and 
 - CPU performance too slow: use smaller quantized model and VAD.
 - Missing GPU runtime: fall back to CPU and document GPU prerequisites.
 - Audio capture issues on some devices: provide device selection flag.
-- Model size too large: allow user to swap model via CLI flag.
+- Model unavailable: report the pinned asset preparation command.
 - Hotkey permissions vary by distro: document input group or udev setup.
 - Paste permissions vary by session: fall back to stdout when clipboard or uinput access is unavailable.

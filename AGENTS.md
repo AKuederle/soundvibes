@@ -38,8 +38,6 @@ See `docs/parakeet.md` for SPIRV-Headers and CPU-only build prerequisites.
 Tests (specific variants):
 - `cargo test` (all tests)
 - `cargo test transcribes_sample_audio` (single test by name)
-- `cargo test --test whisper_integration` (single integration test file)
-- `SV_MODEL_PATH=... cargo test --test whisper_integration` (override model path)
 - `cargo test --test acceptance` (automated acceptance tests)
 - `cargo test --test acceptance --features test-support` (acceptance tests using test support mocks)
 - `SV_HARDWARE_TESTS=1 cargo test --test acceptance` (hardware acceptance tests)
@@ -69,7 +67,6 @@ Naming conventions:
 - Boolean flags use `is_`/`has_`/`enable_` prefixes when clarity helps.
 
 Error handling:
-- Prefer custom error types (`AppError`, `AudioError`, `WhisperError`) that implement `Display` + `Error`.
 - Map lower-level errors into domain errors with `map_err` and contextual messages.
 - For CLI failures, print with `eprintln!` and exit using `AppError::exit_code()`.
 - Avoid panics in runtime code; use `expect`/`unwrap` only in tests.
@@ -89,7 +86,6 @@ Audio/VAD specifics:
 - When working with audio streams, surface device errors via `AudioErrorKind`.
 
 FFI bindings:
-- `src/whisper.rs` wraps generated bindings from `build.rs`.
 - Keep unsafe blocks tight and local; return safe Rust types to callers.
 
 Tests:
@@ -100,8 +96,6 @@ Tests:
 
 - `src/main.rs`: CLI entrypoint, config, runtime orchestration.
 - `src/audio.rs`: CPAL/ALSA capture, VAD trimming utilities.
-- `src/whisper.rs`: whisper.cpp FFI wrapper.
-- `tests/whisper_integration.rs`: integration test with a model file.
 - `docs/*.md`: product and acceptance documentation.
 
 ## Release / Session Completion

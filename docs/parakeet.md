@@ -5,8 +5,7 @@ SoundVibes supports NVIDIA Parakeet Unified EN 0.6B through transcribe.cpp
 `7045d1c0fe7cee37747b2792977421d435e75fca`.
 
 Build both binaries with `cargo build --workspace --release` and keep `sv` and
-`sv-parakeet` beside each other when installing. The persistent companion owns
-transcribe.cpp in a separate process because Whisper embeds another ggml version.
+`sv-parakeet` beside each other when installing. The persistent companion owns transcribe.cpp model/session state.
 Model inference and IPC remain local. No service restart or installation is part
 of preparing this backend.
 
@@ -30,7 +29,7 @@ sample_rate = 16000
 Equivalent CLI flags are `--engine parakeet --model PATH --parakeet-backend auto`.
 `auto` selects available acceleration with CPU fallback. `vulkan` requires Vulkan;
 `cpu` uses four CPU threads. GPU sessions use one decoder thread. English and
-16 kHz mono audio are required. Whisper and Phonon-2 remain available.
+16 kHz mono audio are required. Phonon-2 remains available.
 Vocabulary `.txt` files are passed to native Parakeet vocabulary biasing,
 including terms such as TanStack and shadcn.
 

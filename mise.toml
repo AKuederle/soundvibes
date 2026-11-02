@@ -65,5 +65,5 @@ case "${ID}" in
     ;;
 esac
 
-git submodule update --init --recursive
+
 '''

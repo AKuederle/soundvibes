@@ -10,7 +10,6 @@ use sv::daemon;
 use sv::error::AppError;
 use sv::hotkey::HotkeyConfig;
 use sv::inference::InferenceEngine;
-use sv::model::{model_language_for_transcription, ModelLanguage, ModelSize, ModelSpec};
 use sv::output::{OutputConfig, OutputMode};
 use sv::segmentation::{
     DEFAULT_SEGMENT_GRACE_MS, DEFAULT_SEGMENT_MIN_MS, DEFAULT_SEGMENT_OVERLAP_MS,
@@ -21,7 +20,7 @@ use sv::types::{AudioHost, OutputFormat, VadMode};
 #[derive(Parser, Debug)]
 #[command(name = "sv", version, about = "Offline speech-to-text CLI")]
 struct Cli {
-    #[arg(long, default_value = "whisper", global = true)]
+    #[arg(long, default_value = "parakeet", global = true)]
     engine: InferenceEngine,
 
     #[arg(long, default_value = "auto", global = true)]
@@ -41,15 +40,9 @@ struct Cli {
         long,
         value_name = "PATH",
         global = true,
-        help = "Whisper file, Parakeet GGUF file, or unpacked Phonon-2 directory"
+        help = "Parakeet GGUF file or unpacked Phonon-2 directory"
     )]
     model: Option<PathBuf>,
-
-    #[arg(long, default_value = "small", value_name = "SIZE", global = true)]
-    model_size: ModelSize,
-
-    #[arg(long, default_value = "auto", value_name = "LANG", global = true)]
-    model_language: ModelLanguage,
 
     #[arg(long, default_value = "en", value_name = "CODE", global = true)]
     language: String,
@@ -145,9 +138,6 @@ struct Cli {
     #[arg(long, value_name = "KEY", global = true)]
     hotkey_key: Option<String>,
 
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, global = true)]
-    download_model: bool,
-
     #[command(subcommand)]
     command: Option<CliCommand>,
 }
@@ -167,13 +157,6 @@ enum DaemonCommand {
     Start,
     Status,
     Stop,
-    #[command(name = "set-model")]
-    SetModel {
-        #[arg(long, value_name = "SIZE")]
-        size: ModelSize,
-        #[arg(long, value_name = "LANG")]
-        model_language: ModelLanguage,
-    },
     #[command(name = "test-audio")]
     TestAudio,
 }
@@ -184,10 +167,6 @@ enum CliMode {
     StatusDaemon,
     StopDaemon,
     ShowTranscriptPath,
-    SetModel {
-        size: ModelSize,
-        model_language: ModelLanguage,
-    },
     ListDevices,
     TestAudio,
 }
@@ -205,16 +184,6 @@ fn resolve_cli_mode(cli: &Cli) -> CliMode {
         }) => CliMode::StopDaemon,
         Some(CliCommand::TranscriptPath) => CliMode::ShowTranscriptPath,
         Some(CliCommand::Daemon {
-            command:
-                DaemonCommand::SetModel {
-                    size,
-                    model_language,
-                },
-        }) => CliMode::SetModel {
-            size,
-            model_language,
-        },
-        Some(CliCommand::Daemon {
             command: DaemonCommand::TestAudio,
         }) => CliMode::TestAudio,
         None => {
@@ -229,8 +198,6 @@ fn resolve_cli_mode(cli: &Cli) -> CliMode {
 
 #[derive(Debug, Clone)]
 struct Config {
-    model_size: ModelSize,
-    model_language: ModelLanguage,
     daemon: daemon::DaemonConfig,
 }
 
@@ -271,24 +238,6 @@ impl Config {
             .or_else(|| {
                 config_path().and_then(|path| path.parent().map(|p| p.join("vocabulary.d")))
             });
-        let model_size = sources.value("model_size", cli.model_size, file.model_size);
-
-        let (model_language, model_language_explicit) =
-            if matches.value_source("model_language") == Some(ValueSource::CommandLine) {
-                (cli.model_language, true)
-            } else if let Some(model_language) = file.model_language {
-                (model_language, true)
-            } else {
-                (cli.model_language, false)
-            };
-        let model_language = if model_size == ModelSize::LargeV3Turbo && !model_language_explicit {
-            ModelLanguage::Auto
-        } else if model_language_explicit {
-            model_language
-        } else {
-            model_language_for_transcription(&language)
-        };
-
         let device = sources.optional("device", cli.device, file.device);
         let audio_host = sources
             .optional("audio_host", cli.audio_host, file.audio_host)
@@ -364,14 +313,10 @@ impl Config {
             key: sources.optional("hotkey_key", cli.hotkey_key, hotkey_file.key),
         };
 
-        let download_model =
-            sources.value("download_model", cli.download_model, file.download_model);
         let file_model_path = file.model_path.or(file.model);
         let model_path = sources.optional("model", cli.model, file_model_path);
 
         Self {
-            model_size,
-            model_language,
             daemon: daemon::DaemonConfig {
                 engine,
                 parakeet_streaming: sources.value(
@@ -387,7 +332,6 @@ impl Config {
                 phonon2_library_dir,
                 vocabulary_dir,
                 model_path,
-                download_model,
                 language,
                 device,
                 audio_host,
@@ -423,9 +367,6 @@ struct FileConfig {
     vocabulary_dir: Option<PathBuf>,
     model: Option<PathBuf>,
     model_path: Option<PathBuf>,
-    model_size: Option<ModelSize>,
-    model_language: Option<ModelLanguage>,
-    download_model: Option<bool>,
     language: Option<String>,
     device: Option<String>,
     audio_host: Option<AudioHost>,
@@ -478,16 +419,6 @@ fn main() {
             println!("{}", daemon::transcript_file_path().display());
             return;
         }
-        CliMode::SetModel {
-            size,
-            model_language,
-        } => {
-            if let Err(err) = daemon::send_set_model_command(size, model_language) {
-                eprintln!("error: {err}");
-                process::exit(err.exit_code());
-            }
-            return;
-        }
         CliMode::RunDaemon | CliMode::ListDevices | CliMode::TestAudio => {}
     }
     let file_config = match load_config_file() {
@@ -508,13 +439,7 @@ fn main() {
             eprintln!("error: {err}");
             process::exit(err.exit_code());
         }
-        let spec = ModelSpec::new(config.model_size, config.model_language);
         let prepared = match config.daemon.engine {
-            InferenceEngine::Whisper => sv::model::prepare_model(
-                config.daemon.model_path.as_deref(),
-                &spec,
-                config.daemon.download_model,
-            ),
             InferenceEngine::Parakeet => {
                 sv::model::prepare_parakeet_model(config.daemon.model_path.as_deref())
             }
@@ -539,9 +464,6 @@ fn main() {
         println!("Vocabulary directory: {}", directory.display());
     }
     if let Some(prepared) = &prepared_model {
-        if prepared.downloaded {
-            println!("Model download complete.");
-        }
         println!("Model: {}", prepared.path.display());
     }
     println!("Language: {}", config.daemon.language);
@@ -830,61 +752,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_daemon_set_model_subcommand() {
-        let cli = Cli::try_parse_from([
-            "sv",
-            "daemon",
-            "set-model",
-            "--size",
-            "small",
-            "--model-language",
-            "en",
-        ])
-        .expect("failed to parse cli");
-        assert_eq!(
-            resolve_cli_mode(&cli),
-            CliMode::SetModel {
-                size: ModelSize::Small,
-                model_language: ModelLanguage::En,
-            }
-        );
-    }
-
-    #[test]
-    fn parses_large_v3_turbo_model_size() {
-        let cli = Cli::try_parse_from([
-            "sv",
-            "daemon",
-            "set-model",
-            "--size",
-            "large-v3-turbo",
-            "--model-language",
-            "auto",
-        ])
-        .expect("failed to parse cli");
-        assert_eq!(
-            resolve_cli_mode(&cli),
-            CliMode::SetModel {
-                size: ModelSize::LargeV3Turbo,
-                model_language: ModelLanguage::Auto,
-            }
-        );
-    }
-
-    #[test]
-    fn large_v3_turbo_defaults_to_multilingual_model() {
-        let command = Cli::command();
-        let matches = command
-            .try_get_matches_from(["sv", "daemon", "start", "--model-size", "large-v3-turbo"])
-            .expect("failed to parse cli");
-        let cli = Cli::from_arg_matches(&matches).expect("failed to build cli");
-        let config = Config::from_sources(cli, &matches, FileConfig::default());
-
-        assert_eq!(config.model_size, ModelSize::LargeV3Turbo);
-        assert_eq!(config.model_language, ModelLanguage::Auto);
-    }
-
-    #[test]
     fn vocabulary_directory_defaults_and_cli_override_toml() {
         let _lock = lock_tests();
         let _guard = EnvGuard::set("XDG_CONFIG_HOME", std::path::Path::new("/test/config"));
@@ -982,7 +849,7 @@ mod tests {
                 "daemon",
                 "start",
                 "--engine",
-                "whisper",
+                "parakeet",
                 "--phonon2-library-dir",
                 "/cli/native",
             ])
@@ -992,7 +859,7 @@ mod tests {
             &matches,
             file,
         );
-        assert_eq!(config.daemon.engine, InferenceEngine::Whisper);
+        assert_eq!(config.daemon.engine, InferenceEngine::Parakeet);
         assert_eq!(
             config.daemon.phonon2_library_dir,
             Some(PathBuf::from("/cli/native"))

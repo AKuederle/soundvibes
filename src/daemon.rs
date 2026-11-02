@@ -1,5 +1,4 @@
 use chrono::{Local, Utc};
-use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::flag;
@@ -20,7 +19,6 @@ use crate::error::AppError;
 use crate::feedback;
 use crate::hotkey::{self, HotkeyConfig};
 use crate::inference::{InferenceEngine, InferenceFactory};
-use crate::model::{self, ModelLanguage, ModelSize, ModelSpec};
 use crate::output::{self, OutputConfig, OutputMode};
 use crate::segmentation::{self, CutReason, SegmentConfig, SegmentDecision};
 pub use crate::transcription_worker::Transcriber;
@@ -35,7 +33,6 @@ pub struct DaemonConfig {
     pub phonon2_library_dir: Option<PathBuf>,
     pub vocabulary_dir: Option<PathBuf>,
     pub model_path: Option<PathBuf>,
-    pub download_model: bool,
     pub language: String,
     pub device: Option<String>,
     pub audio_host: AudioHost,
@@ -183,10 +180,6 @@ pub enum ControlEvent {
     StopRecording,
     Stop,
     Status,
-    SetModel {
-        size: ModelSize,
-        model_language: ModelLanguage,
-    },
     Error(String),
     Request {
         event: Box<ControlEvent>,
@@ -401,35 +394,6 @@ pub fn run_daemon_loop(
                 ControlEvent::Status => {
                     acknowledge_success(respond_to.as_ref(), &recording, config, None);
                 }
-                ControlEvent::SetModel {
-                    size,
-                    model_language,
-                } => {
-                    match reload_model(
-                        size,
-                        model_language,
-                        &mut recording,
-                        &mut worker,
-                        config,
-                        deps,
-                        output,
-                        &mut last_emitted_transcript,
-                    ) {
-                        Ok(message) => {
-                            output.stdout(&message);
-                            acknowledge_success(
-                                respond_to.as_ref(),
-                                &recording,
-                                config,
-                                Some(message),
-                            );
-                        }
-                        Err(err) => {
-                            output.stderr(&format!("Model reload failed: {err}"));
-                            acknowledge_error(respond_to.as_ref(), &err);
-                        }
-                    }
-                }
                 ControlEvent::Error(message) => return Err(AppError::runtime(message)),
                 ControlEvent::Request { .. } => {
                     unreachable!("control request was already unwrapped")
@@ -545,36 +509,6 @@ fn acknowledge_error(respond_to: Option<&SyncSender<ControlResponse>>, err: &App
 }
 
 #[allow(clippy::too_many_arguments)]
-fn reload_model(
-    size: ModelSize,
-    model_language: ModelLanguage,
-    recording: &mut Option<ActiveRecording>,
-    worker: &mut TranscriptionWorker,
-    config: &DaemonConfig,
-    deps: &DaemonDeps,
-    output: &mut dyn DaemonOutput,
-    last_emitted_transcript: &mut String,
-) -> Result<String, AppError> {
-    if config.engine != InferenceEngine::Whisper {
-        return Err(AppError::config("set-model changes Whisper sizes; restart the daemon to change the engine or model path"));
-    }
-    if recording.take().is_some() {
-        worker.cancel_stream()?;
-        output.stdout("Recording stopped for model reload.");
-    }
-    wait_for_pending_results(worker, config, output, last_emitted_transcript);
-    let spec = ModelSpec::new(size, model_language);
-    let prepared = model::prepare_model(None, &spec, config.download_model)?;
-    if prepared.downloaded {
-        output.stdout("Model download complete.");
-    }
-    let new_transcriber = deps.transcriber_factory.load(Some(&prepared.path))?;
-    worker.reload(new_transcriber)?;
-    Ok(format!(
-        "Model reloaded: size={size}, model-language={model_language}"
-    ))
-}
-
 fn live_streaming(config: &DaemonConfig) -> bool {
     config.engine == InferenceEngine::Parakeet && config.parakeet_streaming
 }
@@ -889,14 +823,6 @@ pub fn start_socket_listener(
                         Ok(ControlEvent::Stop)
                     } else if command == "status" {
                         Ok(ControlEvent::Status)
-                    } else if command.starts_with("set-model") {
-                        match parse_set_model_command(command) {
-                            Ok((size, model_language)) => Ok(ControlEvent::SetModel {
-                                size,
-                                model_language,
-                            }),
-                            Err(message) => Err(message),
-                        }
                     } else {
                         Err(format!("unsupported daemon command: {command}"))
                     };
@@ -956,28 +882,6 @@ fn write_control_response(
         .map_err(|err| AppError::runtime(format!("failed to write daemon response: {err}")))
 }
 
-fn parse_set_model_command(command: &str) -> Result<(ModelSize, ModelLanguage), String> {
-    let mut size = None;
-    let mut model_language = None;
-    for token in command.split_whitespace().skip(1) {
-        if let Some(value) = token.strip_prefix("size=") {
-            size = Some(ModelSize::from_str(value, true).map_err(|_| {
-                format!("invalid model size '{value}' (expected auto|tiny|base|small|medium|large|large-v3-turbo)")
-            })?);
-        } else if let Some(value) = token.strip_prefix("model-language=") {
-            model_language = Some(
-                ModelLanguage::from_str(value, true)
-                    .map_err(|_| format!("invalid model language '{value}' (expected auto|en)"))?,
-            );
-        }
-    }
-
-    let size = size.ok_or_else(|| "missing size=<SIZE>".to_string())?;
-    let model_language =
-        model_language.ok_or_else(|| "missing model-language=<LANG>".to_string())?;
-    Ok((size, model_language))
-}
-
 pub fn send_record_start_command() -> Result<ControlResponse, AppError> {
     send_daemon_command("record-start")
 }
@@ -992,14 +896,6 @@ pub fn send_stop_command() -> Result<ControlResponse, AppError> {
 
 pub fn send_status_command() -> Result<ControlResponse, AppError> {
     send_daemon_command("status")
-}
-
-pub fn send_set_model_command(
-    size: ModelSize,
-    model_language: ModelLanguage,
-) -> Result<ControlResponse, AppError> {
-    let command = format!("set-model size={size} model-language={model_language}");
-    send_daemon_command(&command)
 }
 
 fn send_daemon_command(command: &str) -> Result<ControlResponse, AppError> {
@@ -1080,7 +976,8 @@ impl CaptureSource for CpalCapture {
 pub mod test_support {
     use std::collections::VecDeque;
     use std::path::Path;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+    use std::sync::Mutex;
 
     use super::{
         AudioBackend, CaptureSource, DaemonConfig, DaemonOutput, Transcriber, TranscriberFactory,
@@ -1097,13 +994,12 @@ pub mod test_support {
 
     pub fn daemon_config() -> DaemonConfig {
         DaemonConfig {
-            engine: crate::inference::InferenceEngine::Whisper,
+            engine: crate::inference::InferenceEngine::Phonon2,
             parakeet_streaming: true,
             parakeet_backend: Default::default(),
             phonon2_library_dir: None,
             vocabulary_dir: None,
             model_path: None,
-            download_model: false,
             language: "en".to_string(),
             device: None,
             audio_host: AudioHost::Default,
@@ -1288,10 +1184,8 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
@@ -1377,12 +1271,12 @@ mod tests {
         let deps = DaemonDeps {
             audio: Box::new(TestAudioBackend::new(
                 vec!["Mic".to_string()],
-                vec![vec![0.0; 100]],
+                vec![vec![0.0; 1600]],
             )),
             transcriber_factory: Box::new(TestTranscriberFactory::new(Vec::new())),
         };
         let config = DaemonConfig {
-            sample_rate: 1_000,
+            sample_rate: 16_000,
             no_speech_timeout_ms: 30,
             ..daemon_config()
         };
@@ -1414,12 +1308,12 @@ mod tests {
         let deps = DaemonDeps {
             audio: Box::new(TestAudioBackend::new(
                 vec!["Mic".to_string()],
-                vec![vec![0.2; 100]],
+                vec![vec![0.2; 1600]],
             )),
             transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["speech".to_string()])),
         };
         let config = DaemonConfig {
-            sample_rate: 1_000,
+            sample_rate: 16_000,
             no_speech_timeout_ms: 30,
             ..daemon_config()
         };
@@ -1505,14 +1399,14 @@ mod tests {
         let deps = DaemonDeps {
             audio: Box::new(TestAudioBackend::new(
                 vec!["Mic".to_string()],
-                vec![vec![0.2; 20], vec![0.2; 20], vec![0.2; 20]],
+                vec![vec![0.2; 320], vec![0.2; 320], vec![0.2; 320]],
             )),
             transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
                 "timed transcript".to_string()
             ])),
         };
         let config = DaemonConfig {
-            sample_rate: 1_000,
+            sample_rate: 16_000,
             vad: VadMode::Continuous,
             vad_silence_ms: 100,
             vad_chunk_ms: 20,
@@ -1563,7 +1457,12 @@ mod tests {
         let deps = DaemonDeps {
             audio: Box::new(TestAudioBackend::new(
                 vec!["Mic".to_string()],
-                vec![vec![0.2; 20], vec![0.0; 5], vec![0.2; 20], vec![0.0; 20]],
+                vec![
+                    vec![0.2; 320],
+                    vec![0.0; 80],
+                    vec![0.2; 320],
+                    vec![0.0; 320],
+                ],
             )),
             transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
                 "hello world".to_string(),
@@ -1571,7 +1470,7 @@ mod tests {
             ])),
         };
         let config = DaemonConfig {
-            sample_rate: 1_000,
+            sample_rate: 16_000,
             vad: VadMode::Continuous,
             vad_silence_ms: 20,
             vad_chunk_ms: 20,
@@ -1619,7 +1518,12 @@ mod tests {
         let deps = DaemonDeps {
             audio: Box::new(TestAudioBackend::new(
                 vec!["Mic".to_string()],
-                vec![vec![0.2; 20], vec![0.0; 5], vec![0.2; 20], vec![0.0; 20]],
+                vec![
+                    vec![0.2; 320],
+                    vec![0.0; 80],
+                    vec![0.2; 320],
+                    vec![0.0; 320],
+                ],
             )),
             transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
                 "hello world".to_string(),
@@ -1627,7 +1531,7 @@ mod tests {
             ])),
         };
         let config = DaemonConfig {
-            sample_rate: 1_000,
+            sample_rate: 16_000,
             vad: VadMode::Continuous,
             vad_silence_ms: 20,
             vad_chunk_ms: 20,
@@ -1672,61 +1576,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn failed_model_reload_keeps_existing_worker() -> Result<(), AppError> {
-        let data_home = temp_data_home();
-        let _data_guard = EnvGuard::set("XDG_DATA_HOME", &data_home);
-        let model_path = data_home
-            .join("soundvibes")
-            .join("models")
-            .join("ggml-small.en.bin");
-        fs::create_dir_all(model_path.parent().expect("model parent")).expect("create model dir");
-        fs::write(&model_path, b"test model").expect("write model file");
-
-        let (sender, receiver) = mpsc::channel();
-        let control_sender = sender.clone();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let mut output = TestOutput::default();
-        let deps = DaemonDeps {
-            audio: Box::new(TestAudioBackend::new(
-                vec!["Mic".to_string()],
-                vec![vec![0.2; 160]],
-            )),
-            transcriber_factory: Box::new(ReloadFailFactory {
-                responses: Arc::new(Mutex::new(vec![Ok("after failure".to_string())].into())),
-                load_count: Arc::new(AtomicUsize::new(0)),
-            }),
-        };
-        let config = daemon_config();
-
-        let shutdown_trigger = Arc::clone(&shutdown);
-        let control_thread = thread::spawn(move || {
-            let _ = control_sender.send(ControlEvent::SetModel {
-                size: ModelSize::Small,
-                model_language: ModelLanguage::En,
-            });
-            thread::sleep(Duration::from_millis(50));
-            let _ = control_sender.send(ControlEvent::StartRecording);
-            let _ = control_sender.send(ControlEvent::StopRecording);
-            thread::sleep(Duration::from_millis(50));
-            shutdown_trigger.store(true, Ordering::Relaxed);
-        });
-
-        let result = run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown);
-        control_thread.join().expect("control thread failed");
-        result?;
-
-        assert!(output
-            .stderr_lines()
-            .iter()
-            .any(|line| line.contains("Model reload failed")));
-        assert!(output
-            .stdout_lines()
-            .iter()
-            .any(|line| line.contains("Transcript 1: after failure")));
-        Ok(())
-    }
-
     struct SignalOutput {
         stdout: Vec<String>,
         stderr: Vec<String>,
@@ -1744,95 +1593,5 @@ mod tests {
         fn stderr(&mut self, message: &str) {
             self.stderr.push(message.to_string());
         }
-    }
-
-    struct ReloadFailFactory {
-        responses: Arc<Mutex<VecDeque<Result<String, AppError>>>>,
-        load_count: Arc<AtomicUsize>,
-    }
-
-    impl TranscriberFactory for ReloadFailFactory {
-        fn load(&self, _model_path: Option<&Path>) -> Result<Box<dyn Transcriber>, AppError> {
-            let load_number = self.load_count.fetch_add(1, AtomicOrdering::SeqCst);
-            if load_number == 1 {
-                return Err(AppError::runtime("planned reload failure"));
-            }
-            Ok(Box::new(ReloadFailTranscriber {
-                responses: Arc::clone(&self.responses),
-            }))
-        }
-    }
-
-    struct ReloadFailTranscriber {
-        responses: Arc<Mutex<VecDeque<Result<String, AppError>>>>,
-    }
-
-    impl Transcriber for ReloadFailTranscriber {
-        fn set_vocabulary(&mut self, _words: &[String]) -> Result<Option<String>, AppError> {
-            Ok(None)
-        }
-
-        fn transcribe(
-            &self,
-            _samples: &[f32],
-            _language: Option<&str>,
-        ) -> Result<String, AppError> {
-            self.responses
-                .lock()
-                .expect("responses lock")
-                .pop_front()
-                .unwrap_or_else(|| Ok(String::new()))
-        }
-    }
-
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &Path) -> Self {
-            let previous = env::var_os(key);
-            env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => env::set_var(self.key, value),
-                None => env::remove_var(self.key),
-            }
-        }
-    }
-
-    fn temp_data_home() -> PathBuf {
-        let mut dir = env::temp_dir();
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        dir.push(format!(
-            "soundvibes-daemon-test-{}-{stamp}",
-            std::process::id()
-        ));
-        dir
-    }
-
-    #[test]
-    fn parses_set_model_command_tokens() {
-        let (size, model_language) =
-            parse_set_model_command("set-model size=small model-language=en")
-                .expect("expected parse success");
-        assert_eq!(size, ModelSize::Small);
-        assert_eq!(model_language, ModelLanguage::En);
-    }
-
-    #[test]
-    fn rejects_set_model_command_missing_language() {
-        let err =
-            parse_set_model_command("set-model size=small").expect_err("expected parse error");
-        assert!(err.contains("model-language"));
     }
 }

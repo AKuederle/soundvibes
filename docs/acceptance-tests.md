@@ -6,7 +6,7 @@ These tests validate the product behavior for the offline Linux CLI.
 - Linux x86_64 machine with a working microphone.
 - `<data-home>` means `$XDG_DATA_HOME` when set, or `~/.local/share` when it is unset.
 - `<config-home>` means `$XDG_CONFIG_HOME` when set, or `~/.config` when it is unset.
-- Model file available at `<data-home>/soundvibes/models/ggml-base.en.bin`.
+- Model file available at `<data-home>/soundvibes/models/parakeet-unified-en-0.6b-Q8_0.gguf`.
 - Config file at `<config-home>/soundvibes/config.toml`.
 - No network required.
 - If available, a machine with a supported NVIDIA/AMD GPU for GPU-acceleration checks.
@@ -14,7 +14,7 @@ These tests validate the product behavior for the offline Linux CLI.
 ## Automation notes
 - Harness helpers live under `sv::daemon::test_support` and require `cargo test --features test-support`.
 - Hardware-dependent tests should be guarded with opt-in env vars:
-  - `SV_MODEL_PATH` to point at a local model file for transcription tests.
+  - `SV_PARAKEET_MODEL` to point at a local model file for transcription tests.
   - `SV_HARDWARE_TESTS=1` to opt into microphone/GPU checks.
 - Automated acceptance tests live in `tests/acceptance.rs` and should map to the AT-xx entries below.
 - Run automated acceptance tests with `cargo test --test acceptance` (add `--features test-support` when using mocks).
@@ -23,25 +23,13 @@ These tests validate the product behavior for the offline Linux CLI.
 ## Tests
 
 ### AT-01: CLI starts with valid model
-- Setup: set `model` in config to `<data-home>/soundvibes/models/ggml-base.en.bin`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/parakeet-unified-en-0.6b-Q8_0.gguf`.
 - Command: `sv daemon start`
 - Expect: process starts, listens on socket, no error output.
 - Pass: exit code is `0` after user stops the process.
 
-### AT-01a: Missing model is auto-downloaded
-- Setup: remove `<data-home>/soundvibes/models/ggml-small.bin`, set `model_size` to `small` and `model_language` to `auto`.
-- Command: `sv daemon start`
-- Expect: model download occurs before startup completes.
-- Pass: model file exists at the default location and daemon starts.
-
-### AT-01b: Language selects model variant
-- Setup: set `language = "en"` without `model_language`.
-- Command: `sv daemon start`
-- Expect: model download uses the `.en` variant when available.
-- Pass: model file path resolves to `ggml-<size>.en.bin` when language is `en` and `model_language` is unset; `large-v3-turbo` resolves to `ggml-large-v3-turbo.bin`.
-
 ### AT-02: Missing model returns error
-- Setup: set `model` in config to `<data-home>/soundvibes/models/missing.bin` and set `download_model = false`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/missing.bin`.
 - Command: `sv daemon start`
 - Expect: error message indicating missing model.
 - Pass: exit code is `2`.
@@ -53,7 +41,7 @@ These tests validate the product behavior for the offline Linux CLI.
 - Pass: exit code is `3`.
 
 ### AT-04: Daemon hold-to-record capture
-- Setup: set `model` in config to `<data-home>/soundvibes/models/ggml-base.en.bin`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/parakeet-unified-en-0.6b-Q8_0.gguf`.
 - Command: `sv daemon start` with `[hotkey] enabled = true` and a configured key such as `RIGHTCTRL`.
 - Action: hold the configured key, speak a short sentence, then release the key.
 - Expect: final transcript is printed after key release.
@@ -74,21 +62,21 @@ These tests validate the product behavior for the offline Linux CLI.
 - Pass: JSONL lines parse and include required fields.
 
 ### AT-05a: Continuous hold-to-record pause transcription
-- Setup: set `vad = "continuous"` and configure `[hotkey] key = "RIGHTCTRL"`.
+- Setup: set `parakeet_streaming = false` and `vad = "continuous"` and configure `[hotkey] key = "RIGHTCTRL"`.
 - Command: `sv daemon start`.
 - Action: hold the configured key, speak one sentence, pause without releasing, then speak another sentence.
 - Expect: the first sentence is transcribed after the pause while the key is still held.
 - Pass: output appears after the pause and recording continues until key release.
 
 ### AT-05b: Continuous long-speech timed segmentation
-- Setup: set `vad = "continuous"` with default segment timing or explicit `segment_target_ms`, `segment_grace_ms`, `segment_overlap_ms`, and `segment_min_ms`.
+- Setup: set `parakeet_streaming = false` and `vad = "continuous"` with default segment timing or explicit `segment_target_ms`, `segment_grace_ms`, `segment_overlap_ms`, and `segment_min_ms`.
 - Command: `sv daemon start`.
 - Action: hold the configured key and keep speaking past the segment target without a full silence break.
 - Expect: SoundVibes starts transcribing a timed segment while audio capture continues.
 - Pass: output appears before key release, and the remaining tail is transcribed after release.
 
 ### AT-06: Offline operation
-- Setup: set `model` in config to `<data-home>/soundvibes/models/ggml-base.en.bin`.
+- Setup: set `model` in config to `<data-home>/soundvibes/models/parakeet-unified-en-0.6b-Q8_0.gguf`.
 - Command: disconnect network, run `sv daemon start`, then hold/release the configured key.
 - Expect: no network access required.
 - Pass: transcription works without network connectivity.
@@ -146,9 +134,9 @@ These tests validate the product behavior for the offline Linux CLI.
 
 ### AT-16a: Phonon-2 asset setup
 - Setup: choose Phonon-2 through TOML and point `--model` at an empty directory.
-- Action: start with `download_model = true`.
-- Expect: exit code 2 with the Phonon-2 setup command; no Whisper model is downloaded.
-- Automated: `at16a_phonon2_missing_assets_report_setup_without_whisper_download`.
+- Action: start with `engine = "phonon2"`.
+- Expect: exit code 2 with the Phonon-2 setup command; no automatic download is attempted.
+- Automated: `at16a_phonon2_missing_assets_report_setup`.
 
 ### AT-16b: Real Phonon-2 transcription through the daemon
 - Setup: run `scripts/prepare-phonon2.py` and set `PHONON2_MODEL_DIR` and `PHONON2_LIBRARY_DIR` to the prepared assets.
@@ -157,11 +145,6 @@ These tests validate the product behavior for the offline Linux CLI.
 - Expect: output contains both known "ask not" and "ask what" phrases. Inference uses no Python process or network.
 - Automated: `at16b_phonon2_real_model_transcribes_through_daemon_worker`. Missing environment variables skip; configured assets must load successfully.
 - Crate-level tests additionally compare the official CPU feature fixture, reject invalid containers, and exercise repeated decode, model reload and worker-thread migration. `PHONON2_REFERENCE_JSON` and `PHONON2_REFERENCE_FEATURES` enable full Python-reference comparison.
-
-### AT-16c: Whisper-size reload while Phonon-2 is selected
-- Action: issue `set-model` during an active Phonon-2 recording.
-- Expect: acknowledged error explaining the command applies to Whisper. The recording continues and emits its transcript when stopped.
-- Automated: `at16c_phonon2_rejects_whisper_reload_without_interrupting_recording` with `test-support`.
 
 ### AT-17: Live vocabulary files from multiple applications
 - Setup: configure `vocabulary_dir` or `--vocabulary-dir`; by default use `$XDG_CONFIG_HOME/soundvibes/vocabulary.d` or `~/.config/soundvibes/vocabulary.d`.
@@ -177,9 +160,9 @@ These tests validate the product behavior for the offline Linux CLI.
 
 ### AT-17b: Real engine vocabulary and capacity
 - Action: transcribe the bundled JFK audio with vocabulary, then clear it. Supply an oversized list.
-- Expect: Whisper accepts hints, reports its prompt-token capacity, and clearing removes prompt history. Phonon-2 uses native bias, clearing restores the baseline, and a 26-term directory reports that the first 25 terms are used.
-- Automated: `at16b_phonon2_real_model_transcribes_through_daemon_worker` in `tests/acceptance.rs` verifies directory-to-engine delivery and its capacity warning. `transcribes_sample_audio` in `tests/whisper_integration.rs` verifies Whisper hints/capacity/clearing. `transcribes_real_audio_without_python` in `crates/phonon2/tests/transcription.rs` verifies native bias, clearing and zero strength.
-- Missing external model inputs skip ordinary runs. Configure `SV_MODEL_PATH`, `PHONON2_MODEL_DIR` and `PHONON2_LIBRARY_DIR` to exercise real engines. The Phonon-2 libraries must be the pinned 0.2.11 version. Live microphone and Arm hardware are outside these automated checks.
+- Expect: Parakeet accepts native vocabulary in offline and streaming runs. Phonon-2 uses native bias, clearing restores the baseline, and a 26-term directory reports that the first 25 terms are used.
+- Automated: `at16b_phonon2_real_model_transcribes_through_daemon_worker` in `tests/acceptance.rs` verifies directory-to-engine delivery and its capacity warning. `transcribes_real_audio_without_python` in `crates/phonon2/tests/transcription.rs` verifies native bias, clearing and zero strength.
+- Missing external model inputs skip ordinary runs. Configure `SV_PARAKEET_MODEL`, `PHONON2_MODEL_DIR` and `PHONON2_LIBRARY_DIR` to exercise real engines. The Phonon-2 libraries must be the pinned 0.2.11 version. Live microphone and Arm hardware are outside these automated checks.
 
 ### AT-38: Parakeet Unified EN offline recognition
 

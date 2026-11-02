@@ -9,9 +9,8 @@ use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Write;
 use std::io::{BufRead, BufReader};
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -33,8 +32,6 @@ use sv::daemon::{DaemonConfig, DaemonDeps, DaemonOutput};
 #[cfg(feature = "test-support")]
 use sv::error::AppError;
 use sv::hotkey::{self, HotkeyConfig};
-#[cfg(feature = "test-support")]
-use sv::model::{ModelLanguage, ModelSize};
 #[cfg(feature = "test-support")]
 use sv::output::test_support::{RecordedCommand, TestRunner};
 #[cfg(feature = "test-support")]
@@ -279,17 +276,15 @@ fn at16_phonon2_rejects_unsupported_audio_configuration() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn at16a_phonon2_missing_assets_report_setup_without_whisper_download() -> Result<(), Box<dyn Error>>
-{
+fn at16a_phonon2_missing_assets_report_setup() -> Result<(), Box<dyn Error>> {
     let config_home = temp_dir("soundvibes-phonon2-config");
     let model_dir = temp_dir("soundvibes-phonon2-model");
     fs::create_dir_all(&model_dir)?;
     write_config(&config_home, "engine = \"phonon2\"\n")?;
     let output = Command::new(env!("CARGO_BIN_EXE_sv"))
-        .args(["daemon", "start", "--download-model", "true", "--model"])
+        .args(["daemon", "start", "--model"])
         .arg(&model_dir)
         .env("XDG_CONFIG_HOME", &config_home)
-        .env("SV_MODEL_BASE_URL", "http://127.0.0.1:1")
         .output()?;
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -297,7 +292,6 @@ fn at16a_phonon2_missing_assets_report_setup_without_whisper_download() -> Resul
         stderr.contains("Phonon-2 model not found") && stderr.contains("prepare-phonon2.py"),
         "{stderr}"
     );
-    assert!(!model_dir.join("ggml-small.bin").exists());
     fs::remove_dir_all(config_home)?;
     fs::remove_dir_all(model_dir)?;
     Ok(())
@@ -317,7 +311,7 @@ fn at16b_phonon2_real_model_transcribes_through_daemon_worker() -> Result<(), Bo
         .map(|i| format!("ProjectTerm{i}\n"))
         .collect::<String>();
     fs::write(vocabulary_dir.join("app.txt"), terms)?;
-    let mut reader = hound::WavReader::open("vendor/whisper.cpp/samples/jfk.wav")?;
+    let mut reader = hound::WavReader::open("tests/fixtures/jfk.wav")?;
     let samples: Vec<f32> = reader
         .samples::<i16>()
         .map(|s| s.map(|v| v as f32 / 32768.0))
@@ -365,55 +359,6 @@ fn at16b_phonon2_real_model_transcribes_through_daemon_worker() -> Result<(), Bo
         "stdout: {:?}; stderr: {:?}",
         output.stdout_lines(),
         output.stderr_lines()
-    );
-    Ok(())
-}
-
-#[cfg(feature = "test-support")]
-#[test]
-fn at16c_phonon2_rejects_whisper_reload_without_interrupting_recording(
-) -> Result<(), Box<dyn Error>> {
-    let config = DaemonConfig {
-        engine: sv::inference::InferenceEngine::Phonon2,
-        ..daemon_config()
-    };
-    let deps = DaemonDeps {
-        audio: Box::new(TestAudioBackend::new(
-            vec!["Fixture".into()],
-            vec![vec![0.2; 1600]],
-        )),
-        transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["still recording".into()])),
-    };
-    let (sender, receiver) = mpsc::channel();
-    let (reply, response) = mpsc::sync_channel(1);
-    sender.send(ControlEvent::StartRecording)?;
-    sender.send(ControlEvent::Request {
-        event: Box::new(ControlEvent::SetModel {
-            size: ModelSize::Tiny,
-            model_language: ModelLanguage::En,
-        }),
-        respond_to: reply,
-    })?;
-    sender.send(ControlEvent::StopRecording)?;
-    sender.send(ControlEvent::Stop)?;
-    let mut output = TestOutput::default();
-    sv::daemon::run_daemon_loop(
-        &config,
-        &deps,
-        &mut output,
-        receiver,
-        &AtomicBool::new(false),
-    )?;
-    let response = response.recv_timeout(Duration::from_secs(1))?;
-    assert!(!response.ok);
-    assert!(response.message.unwrap_or_default().contains("set-model"));
-    assert!(
-        output
-            .stdout_lines()
-            .iter()
-            .any(|line| line.contains("Transcript 1: still recording")),
-        "{:?}",
-        output.stdout_lines()
     );
     Ok(())
 }
@@ -470,59 +415,13 @@ fn at01_daemon_starts_with_valid_model() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn at01a_missing_model_is_auto_downloaded() -> Result<(), Box<dyn Error>> {
-    let data_home = temp_dir("soundvibes-acceptance-data");
-    let _data_guard = EnvGuard::set("XDG_DATA_HOME", &data_home);
-    let payload = b"soundvibes-test-model".to_vec();
-    let (base_url, server_handle) = start_test_server(payload.clone())?;
-    let _url_guard = EnvGuard::set("SV_MODEL_BASE_URL", &base_url);
-
-    let spec =
-        sv::model::ModelSpec::new(sv::model::ModelSize::Auto, sv::model::ModelLanguage::Auto);
-    let prepared = sv::model::prepare_model(None, &spec, true)?;
-
-    assert!(prepared.downloaded, "expected model download");
-    assert!(prepared.path.exists(), "expected model file to exist");
-    let stored = fs::read(&prepared.path)?;
-    assert_eq!(stored, payload, "downloaded model bytes mismatch");
-    let _ = server_handle.join();
-    Ok(())
-}
-
-#[test]
-fn at01b_language_selects_model_variant() -> Result<(), Box<dyn Error>> {
-    let english = sv::model::model_language_for_transcription("en");
-    let auto = sv::model::model_language_for_transcription("auto");
-    let other = sv::model::model_language_for_transcription("es");
-
-    assert_eq!(english, sv::model::ModelLanguage::En);
-    assert_eq!(auto, sv::model::ModelLanguage::Auto);
-    assert_eq!(other, sv::model::ModelLanguage::Auto);
-
-    let english_spec = sv::model::ModelSpec::new(sv::model::ModelSize::Small, english);
-    let auto_spec = sv::model::ModelSpec::new(sv::model::ModelSize::Small, auto);
-    let turbo_spec = sv::model::ModelSpec::new(
-        sv::model::ModelSize::LargeV3Turbo,
-        sv::model::ModelLanguage::Auto,
-    );
-
-    assert!(english_spec.filename_result()?.contains(".en."));
-    assert!(!auto_spec.filename_result()?.contains(".en."));
-    assert_eq!(turbo_spec.filename_result()?, "ggml-large-v3-turbo.bin");
-    Ok(())
-}
-
-#[test]
 fn at02_missing_model_returns_exit_code_2() -> Result<(), Box<dyn Error>> {
     let config_home = temp_dir("soundvibes-acceptance-config");
     let runtime_dir = temp_dir("soundvibes-acceptance-runtime");
     let missing_path = temp_dir("soundvibes-missing-model").join("missing.bin");
     write_config(
         &config_home,
-        &format!(
-            "model = \"{}\"\ndownload_model = false\n",
-            missing_path.display()
-        ),
+        &format!("model = \"{}\"\n", missing_path.display()),
     )?;
 
     let binary = env!("CARGO_BIN_EXE_sv");
@@ -536,7 +435,7 @@ fn at02_missing_model_returns_exit_code_2() -> Result<(), Box<dyn Error>> {
     assert_eq!(status, 2, "expected exit code 2, got {status}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("model file not found"),
+        stderr.contains("Parakeet model missing"),
         "expected missing model error, got: {stderr}"
     );
     Ok(())
@@ -773,14 +672,14 @@ fn at05b_continuous_long_speech_transcribes_before_release() -> Result<(), Box<d
     let deps = DaemonDeps {
         audio: Box::new(TestAudioBackend::new(
             vec!["Mic".to_string()],
-            vec![vec![0.2; 20], vec![0.2; 20], vec![0.2; 20]],
+            vec![vec![0.2; 320], vec![0.2; 320], vec![0.2; 320]],
         )),
         transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
             "timed transcript".to_string()
         ])),
     };
     let config = DaemonConfig {
-        sample_rate: 1_000,
+        sample_rate: 16_000,
         vad: VadMode::Continuous,
         vad_silence_ms: 100,
         vad_chunk_ms: 20,
@@ -927,7 +826,7 @@ fn at07_gpu_auto_select() -> Result<(), Box<dyn Error>> {
     let stderr_lines = run_daemon_for_logs(&config_home, &runtime_dir)?;
     let stderr_joined = stderr_lines.join("\n");
     assert!(
-        stderr_joined.contains("whisper: GPU backend selected"),
+        stderr_joined.contains("Parakeet backend: Vulkan"),
         "expected GPU backend selection, got: {stderr_joined}"
     );
     Ok(())
@@ -955,13 +854,16 @@ fn at07_cpu_fallback() -> Result<(), Box<dyn Error>> {
     let runtime_dir = temp_dir("soundvibes-acceptance-runtime");
     write_config(
         &config_home,
-        &format!("model = \"{}\"\n", model_path.display()),
+        &format!(
+            "model = \"{}\"\nparakeet_backend = \"cpu\"\n",
+            model_path.display()
+        ),
     )?;
 
     let stderr_lines = run_daemon_for_logs(&config_home, &runtime_dir)?;
     let stderr_joined = stderr_lines.join("\n");
     assert!(
-        stderr_joined.contains("using CPU"),
+        stderr_joined.contains("Parakeet backend: CPU"),
         "expected CPU fallback message, got: {stderr_joined}"
     );
     Ok(())
@@ -1263,11 +1165,8 @@ fn at12_daemon_status_is_acknowledged() -> Result<(), Box<dyn Error>> {
         assert_eq!(status.state.as_deref(), Some("idle"));
         assert_eq!(status.language.as_deref(), Some("en"));
 
-        let reload = sv::daemon::send_set_model_command(ModelSize::Tiny, ModelLanguage::En);
         let stopped = sv::daemon::send_stop_command()?;
         assert!(stopped.ok);
-        let reload_error = reload.expect_err("missing model reload should fail");
-        assert!(reload_error.to_string().contains("model file not found"));
         Ok(())
     });
 
@@ -1329,7 +1228,7 @@ fn assert_virtual_hotkey(
 }
 
 fn model_path() -> Result<PathBuf, Box<dyn Error>> {
-    if let Ok(path) = env::var("SV_MODEL_PATH") {
+    if let Ok(path) = env::var("SV_PARAKEET_MODEL") {
         return Ok(PathBuf::from(path));
     }
     let data_home = env::var("XDG_DATA_HOME")
@@ -1339,7 +1238,7 @@ fn model_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(data_home
         .join("soundvibes")
         .join("models")
-        .join("ggml-base.en.bin"))
+        .join("parakeet-unified-en-0.6b-Q8_0.gguf"))
 }
 
 fn temp_dir(prefix: &str) -> PathBuf {
@@ -1372,24 +1271,6 @@ impl Drop for EnvGuard {
             None => env::remove_var(self.key),
         }
     }
-}
-
-fn start_test_server(payload: Vec<u8>) -> Result<(String, thread::JoinHandle<()>), Box<dyn Error>> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let addr = listener.local_addr()?;
-    let handle = thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
-            let mut buffer = [0u8; 1024];
-            let _ = stream.read(&mut buffer);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-                payload.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.write_all(&payload);
-        }
-    });
-    Ok((format!("http://{addr}"), handle))
 }
 
 fn write_config(config_home: &std::path::Path, contents: &str) -> Result<(), Box<dyn Error>> {
@@ -1516,7 +1397,7 @@ fn parakeet_real_asset_offline() -> Result<(), Box<dyn Error>> {
         output.read_line(&mut line)? > 0,
         "companion failed loading model"
     );
-    let mut wav = hound::WavReader::open("vendor/whisper.cpp/samples/jfk.wav")?;
+    let mut wav = hound::WavReader::open("tests/fixtures/jfk.wav")?;
     let samples: Vec<f32> = wav
         .samples::<i16>()
         .map(|s| s.map(|v| v as f32 / 32768.0))
@@ -1550,7 +1431,7 @@ fn parakeet_real_asset_streams_through_daemon() -> Result<(), Box<dyn Error>> {
         eprintln!("skip AT-39: set SV_PARAKEET_MODEL");
         return Ok(());
     };
-    let mut wav = hound::WavReader::open("vendor/whisper.cpp/samples/jfk.wav")?;
+    let mut wav = hound::WavReader::open("tests/fixtures/jfk.wav")?;
     let samples: Vec<f32> = wav
         .samples::<i16>()
         .map(|s| s.map(|v| v as f32 / 32768.0))

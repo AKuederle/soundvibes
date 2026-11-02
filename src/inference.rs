@@ -7,15 +7,13 @@ use std::sync::Mutex;
 use crate::daemon::TranscriberFactory;
 use crate::error::AppError;
 use crate::transcription_worker::Transcriber;
-use crate::whisper::WhisperContext;
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, ValueEnum, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InferenceEngine {
-    #[default]
-    Whisper,
     #[value(name = "phonon2")]
     Phonon2,
+    #[default]
     Parakeet,
 }
 
@@ -65,11 +63,6 @@ impl TranscriberFactory for InferenceFactory {
                 model_path,
                 self.parakeet_backend,
             )?)),
-            InferenceEngine::Whisper => {
-                let context = WhisperContext::from_file(model_path)
-                    .map_err(|err| AppError::runtime(err.to_string()))?;
-                Ok(Box::new(WhisperTranscriber { context }))
-            }
             InferenceEngine::Phonon2 => {
                 let library_dir = self
                     .phonon2_library_dir
@@ -82,23 +75,6 @@ impl TranscriberFactory for InferenceFactory {
                 }))
             }
         }
-    }
-}
-
-struct WhisperTranscriber {
-    context: WhisperContext,
-}
-
-impl Transcriber for WhisperTranscriber {
-    fn set_vocabulary(&mut self, words: &[String]) -> Result<Option<String>, AppError> {
-        self.context
-            .set_vocabulary(words)
-            .map_err(|err| AppError::runtime(err.to_string()))
-    }
-    fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String, AppError> {
-        self.context
-            .transcribe(samples, language)
-            .map_err(|err| AppError::runtime(err.to_string()))
     }
 }
 

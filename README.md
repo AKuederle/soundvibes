@@ -1,15 +1,15 @@
 # SoundVibes
 
-SoundVibes (`sv`) is a personal, offline speech-to-text CLI for Linux. It records while a configured evdev key is held, transcribes locally with whisper.cpp or Phonon-2, and pastes or prints the result when the key is released.
+SoundVibes (`sv`) is a personal, offline speech-to-text CLI for Linux. It records while a configured evdev key is held, transcribes locally with Parakeet or Phonon-2, and pastes or prints the result when the key is released.
 
 ## Build and install
 
-Initialize the whisper.cpp submodule and install the local checkout with Cargo:
+Prepare build dependencies and install both executables with Cargo:
 
 ```bash
-git submodule update --init --recursive
 mise run prepare-dev
 cargo install --path .
+cargo install --path crates/sv-parakeet
 ```
 
 `mise run prepare-dev` currently supports Debian/Ubuntu and Arch-family systems. The binary expects Linux x86_64, ALSA, libudev, and optionally Vulkan for GPU acceleration.
@@ -30,8 +30,8 @@ Useful optional settings:
 
 ```toml
 language = "en"
-model_size = "small"
-model_language = "auto"
+engine = "parakeet"
+# model = "/absolute/path/parakeet-unified-en-0.6b-Q8_0.gguf"
 vad = "continuous"
 
 [output]
@@ -88,10 +88,9 @@ vocabulary_dir = "/home/you/vocabulary.d"
 The CLI overrides TOML. Changing the directory setting requires a daemon restart;
 changing files inside it does not.
 
-Whisper uses vocabulary as a text prompt. It keeps the first tokens that fit its
-prompt budget, typically 223 tokens. Phonon-2 uses native hotword bias at strength
-2.0 and accepts the first 25 distinct terms. Both engines warn when the combined
-list exceeds their capacity. Use filename and line order to put priority terms
+Parakeet uses native vocabulary bias in offline and live recognition. Phonon-2
+uses native hotword bias at strength 2.0 and accepts the first 25 distinct terms,
+with a warning for excess terms. Use filename and line order to put priority terms
 first. Vocabulary guides recognition; it does not guarantee a particular spelling.
 
 For Phonon-2, rerun `scripts/prepare-phonon2.py` with the documented dependencies
@@ -124,15 +123,14 @@ Inspect or control the running daemon with acknowledged commands:
 
 ```bash
 sv daemon status
-sv daemon set-model --size small --model-language en
 sv daemon stop
 ```
 
-`status` reports the current recording state and transcription language. Model changes return only after loading succeeds or fails.
+`status` reports the current recording state and transcription language. Restart the daemon to change engines or model paths.
 
 ### Phonon-2
 
-Whisper is the default. Phonon-2 is a second option for English transcription on
+Parakeet is the default. Phonon-2 is another option for English transcription on
 Linux CPUs. Prepare the original model and pinned native libraries once:
 
 ```bash
@@ -157,11 +155,9 @@ unpacked model location. Native libraries default to `DIRECTORY/native`; overrid
 with `--phonon2-library-dir DIRECTORY` or `phonon2_library_dir` in TOML.
 
 Phonon-2 supports `language = "en"` and `"auto"`, both using its English decoder.
-It requires 16 kHz mono audio and runs on CPU. `model_size`, `model_language` and
-`download_model` apply to Whisper. Phonon-2 uses the separate setup command;
-startup reports missing assets without downloading a Whisper model. Restart the
-daemon to change engines. `daemon set-model` changes Whisper sizes and is rejected
-by a Phonon-2 or Parakeet daemon without interrupting a recording.
+It requires 16 kHz mono audio and runs on CPU. Assets are prepared separately;
+startup reports missing assets with the setup command. Restart the daemon to
+change engines or model paths.
 
 The dedicated [phonon2 crate](crates/phonon2/README.md) documents its API, native
 library provenance, and reproducible real-audio/Python comparison tests.

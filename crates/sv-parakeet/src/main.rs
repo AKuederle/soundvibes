@@ -1,4 +1,4 @@
-//! Separate process: transcribe.cpp and whisper.cpp must never share ggml symbols.
+//! Persistent local Parakeet inference process.
 use std::io::{self, BufRead, Write};
 use transcribe_cpp::{Backend, Model, ModelOptions, RunOptions, SessionOptions, StreamOptions};
 

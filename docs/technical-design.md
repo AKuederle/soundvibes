@@ -1,14 +1,15 @@
 # Technical Design: Soundvibes Offline Voice-to-Text CLI
 
 ## Overview
-This document describes the technical design for the `sv` CLI that performs offline, start/stop voice-to-text on Linux using whisper.cpp, Phonon-2, or transcribe.cpp Parakeet.
+SoundVibes is a local Linux dictation CLI with Parakeet Unified English as the
+default backend and Phonon-2 as an optional native CPU backend.
 
 ## Goals
-- Whisper uses a single binary plus automatic model download to a local path. Optional Phonon-2 uses separately prepared model assets and native CPU libraries.
+- Prepare pinned model assets explicitly; inference requires no network.
+- Use Vulkan automatically when available, with a CPU path.
 - Start/stop capture with final text after release; Parakeet can infer during capture.
 - Best-effort latency on CPU.
 - Support daemon mode with socket-based control and text injection at the cursor.
-- Whisper automatically uses NVIDIA/AMD GPUs when available, falling back to CPU. Phonon-2 uses its native CPU engine.
 
 ## Architecture
 - CLI entrypoint loads configuration.
@@ -29,7 +30,6 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Configuration struct shared across pipeline components.
 - Use `[output] mode` to select `paste`, `clipboard`, `type`, or `stdout`.
 - Use `[hotkey] key` to configure the evdev hold-to-record key.
-- Config supports `model_language` and `model_size` selection with a default of the small general model.
 - Allow overriding the model install path (`model_path`) while keeping a default data directory.
 
 ### Audio Capture
@@ -70,10 +70,9 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Systemd user unit or foreground mode used to manage lifecycle.
 
 ### Inference Engine
-- `engine = "whisper"` is the default, bound to whisper.cpp through Rust FFI.
-- Ensure the configured ggml model is downloaded before loading at startup.
+- Default to Parakeet Unified EN Q8_0 with explicitly prepared assets.
 - Run inference on captured audio and return a final transcript.
-- Use a small quantized model for CPU speed.
+- Use Q8_0 weights and an explicit CPU path.
 - Attempt GPU acceleration automatically; fall back to CPU when no supported GPU backend is detected.
 
 - `engine = "phonon2"` selects the dedicated `crates/phonon2` Rust abstraction.
@@ -82,14 +81,12 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Phonon-2 is English only and accepts 16 kHz mono PCM. Validate configuration before model loading or capture.
 - Native calls are serialized across models. Initialize native thread pools once and retain libraries for process lifetime; model handles and weights are freed on drop.
 - Prepare Phonon-2 assets separately with `scripts/prepare-phonon2.py`. `model` identifies the unpacked directory, and native libraries default to its `native` subdirectory, with `phonon2_library_dir` as an override.
-- Restart to switch engines. A Phonon-2 daemon rejects the Whisper-size `set-model` command before altering recording or worker state.
 
 ### Parakeet Unified English
 - `engine = "parakeet"` selects a persistent `sv-parakeet` companion beside `sv`.
-  Process isolation keeps transcribe.cpp and Whisper's bundled ggml versions apart.
 - The companion owns the model/session and exchanges local JSON lines over pipes.
   Auto backend permits CPU fallback; explicit CPU and Vulkan are available.
-- The worker serializes begin/feed/finalize with jobs and reloads. Capture feeds
+- The worker serializes begin/feed/finalize with transcription jobs. Capture feeds
   immediately and drains release audio before submitting finalization. Final text
   uses the existing output path. Partial hypotheses never inject keystrokes.
 - Live mode bypasses offline VAD cuts, retaining full audio for offline retry on
@@ -97,28 +94,21 @@ This document describes the technical design for the `sv` CLI that performs offl
   active recording and drains pending results. Pipe IO and replies have timeouts.
 - `parakeet_streaming = false` restores offline segmentation. English/16 kHz are
   required. Model preparation and deployment are in [parakeet.md](parakeet.md).
-- Parakeet rejects Whisper-size reloads before altering recording state.
 
 ### Live vocabulary
 - `vocabulary_dir` / `--vocabulary-dir` defaults to `vocabulary.d` beside `config.toml`. CLI values override TOML.
 - The background worker reads visible regular `.txt` files directly in the directory before each decode. It merges in filename/line order, normalizes phrase whitespace, ignores blank/comment lines, and deduplicates without case while retaining the first spelling.
 - Additions, edits, atomic replacements and removals affect the next segment or live recording without model reload. Producers should write a temporary file then rename it to `.txt` to publish complete updates. A missing directory means no hints.
-- Failed reads, invalid UTF-8 and NUL bytes retain the last complete snapshot with a warning. Worker model reloads preserve that snapshot. Directory access runs outside the recording/control loop.
-- Whisper tokenizes the merged list and keeps the first `n_text_ctx / 2 - 1` tokens, with an explicit capacity warning. The C++ shim sets prompt tokens, carries them across decode windows, and clears prior decode context so removed vocabulary cannot persist.
+- Failed reads, invalid UTF-8 and NUL bytes retain the last complete snapshot with a warning. Directory access runs outside the recording/control loop.
 - Phonon-2 compiles the first 25 terms into the upstream sparse word-piece automaton, with a capacity warning for excess terms. The model caches unchanged tables, uses strength 2.0, and disarms native borrowed pointers after each decode. Clearing the list restores unbiased decoding.
 
 - Parakeet receives the combined vocabulary in native run options at stream begin or offline decode. Clearing the directory clears bias on the next recording.
 
-### Model Download
+### Model preparation
 - On `sv`/`sv daemon start` startup, check for the configured model in the default data directory.
-- Download the ggml model if missing, based on `model_language` and `model_size` config (defaults to small + general). `large-v3-turbo` is supported as a multilingual-only model size.
 - If `model_path` is provided, download or resolve the model there instead of the default location.
-- The automatic downloader applies to Whisper. Phonon-2 startup checks prepared assets and reports its setup command when they are missing.
 
 ### GPU Backend Selection
-- Build whisper.cpp with Vulkan enabled for supported AMD/NVIDIA devices.
-- Always enable GPU usage in runtime params; rely on whisper.cpp backend detection to select the first supported device.
-- For Whisper, do not expose GPU selection to the user; if no GPU backend is available, inference continues on CPU.
 
 ### CI and Quality Gates
 - GitHub Actions workflow triggers on `pull_request` targeting `main`.
@@ -132,7 +122,6 @@ This document describes the technical design for the `sv` CLI that performs offl
 
 ## Configuration
 - Format: TOML.
-- Example fields: `engine`, `phonon2_library_dir`, `vocabulary_dir`, `model`, `model_path`, `model_size`, `model_language`, `download_model`, `language`, `device`, `sample_rate`, `format`, `vad`, `[output]`, `[hotkey]`.
 
 ## Data Flow
 1. CLI loads config and model.
@@ -155,7 +144,6 @@ This document describes the technical design for the `sv` CLI that performs offl
 - Validate hold-to-record key press/release behavior.
 - Reconnect an external keyboard and confirm its hold key works without restarting the daemon.
 - Validate paste output in a focused Wayland editor.
-- Validate GPU usage on NVIDIA/AMD systems by checking whisper.cpp startup logs, and verify CPU fallback on systems without a supported GPU backend.
 
 ## Open Questions
 - VAD threshold calibration on the local microphone.

@@ -188,3 +188,14 @@ These tests validate the product behavior for the offline Linux CLI.
 Set `SV_PARAKEET_MODEL` to the verified Q8_0 GGUF to enable it; unset skips.
 An explicitly configured missing/invalid asset fails. `SV_PARAKEET_BACKEND=cpu`
 is the default for this test; set `vulkan` to exercise the GPU.
+
+### AT-39: Live Parakeet recording and release
+
+`parakeet_real_asset_streams_through_daemon` runs the real Parakeet backend through
+capture, worker and daemon final output with vocabulary enabled and continuous VAD.
+It feeds an initial chunk during recording and the remaining JFK audio on release,
+and rejects streaming fallback warnings. Build the companion first, then run
+`SV_PARAKEET_MODEL=PATH cargo test --test acceptance --features test-support parakeet`.
+Set `SV_PARAKEET_BACKEND=vulkan` for GPU validation. Unset model skips cleanly.
+Worker unit tests additionally cover FIFO result order, cancellation, unavailable
+streaming, and begin/feed/finish failures with complete-audio offline fallback.

@@ -79,6 +79,15 @@ impl sv::daemon::TranscriberFactory for VocabularyFactory {
 
 #[cfg(feature = "test-support")]
 fn acknowledge(sender: &mpsc::Sender<ControlEvent>, event: ControlEvent) -> Result<(), String> {
+    acknowledge_with_timeout(sender, event, Duration::from_secs(5))
+}
+
+#[cfg(feature = "test-support")]
+fn acknowledge_with_timeout(
+    sender: &mpsc::Sender<ControlEvent>,
+    event: ControlEvent,
+    timeout: Duration,
+) -> Result<(), String> {
     let (reply, response) = mpsc::sync_channel(1);
     sender
         .send(ControlEvent::Request {
@@ -86,9 +95,7 @@ fn acknowledge(sender: &mpsc::Sender<ControlEvent>, event: ControlEvent) -> Resu
             respond_to: reply,
         })
         .map_err(|e| e.to_string())?;
-    let result = response
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
+    let result = response.recv_timeout(timeout).map_err(|e| e.to_string())?;
     if result.ok {
         Ok(())
     } else {
@@ -1533,5 +1540,78 @@ fn parakeet_real_asset_offline() -> Result<(), Box<dyn Error>> {
     );
     drop(input);
     assert!(child.wait()?.success());
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn parakeet_real_asset_streams_through_daemon() -> Result<(), Box<dyn Error>> {
+    let Some(model) = env::var_os("SV_PARAKEET_MODEL") else {
+        eprintln!("skip AT-39: set SV_PARAKEET_MODEL");
+        return Ok(());
+    };
+    let mut wav = hound::WavReader::open("vendor/whisper.cpp/samples/jfk.wav")?;
+    let samples: Vec<f32> = wav
+        .samples::<i16>()
+        .map(|s| s.map(|v| v as f32 / 32768.0))
+        .collect::<Result<_, _>>()?;
+    let directory = temp_dir("parakeet-stream-vocabulary");
+    fs::create_dir_all(&directory)?;
+    fs::write(directory.join("app.txt"), "TanStack\nshadcn\n")?;
+    let config = DaemonConfig {
+        engine: sv::inference::InferenceEngine::Parakeet,
+        model_path: Some(model.into()),
+        vocabulary_dir: Some(directory.clone()),
+        parakeet_backend: if env::var("SV_PARAKEET_BACKEND").as_deref() == Ok("vulkan") {
+            sv::parakeet::ParakeetBackend::Vulkan
+        } else {
+            sv::parakeet::ParakeetBackend::Cpu
+        },
+        vad: VadMode::Continuous,
+        ..daemon_config()
+    };
+    let mut deps = DaemonDeps::for_config(&config)?;
+    deps.audio = Box::new(TestAudioBackend::new(
+        vec!["Fixture".into()],
+        vec![samples[..1600].to_vec(), samples[1600..].to_vec()],
+    ));
+    let (sender, receiver) = mpsc::channel();
+    let controller = thread::spawn(move || -> Result<(), String> {
+        acknowledge_with_timeout(
+            &sender,
+            ControlEvent::StartRecording,
+            Duration::from_secs(300),
+        )?;
+        // First chunk drains in the start tick; finish drains the entire remainder.
+        acknowledge_with_timeout(
+            &sender,
+            ControlEvent::StopRecording,
+            Duration::from_secs(300),
+        )?;
+        acknowledge_with_timeout(&sender, ControlEvent::Stop, Duration::from_secs(300))
+    });
+    let mut output = TestOutput::default();
+    sv::daemon::run_daemon_loop(
+        &config,
+        &deps,
+        &mut output,
+        receiver,
+        &AtomicBool::new(false),
+    )?;
+    controller.join().unwrap()?;
+    fs::remove_dir_all(directory)?;
+    assert!(
+        !output
+            .stderr_lines()
+            .iter()
+            .any(|line| line.contains("using offline")),
+        "{:?}",
+        output.stderr_lines()
+    );
+    let lines = output.stdout_lines().join(" ").to_lowercase();
+    assert!(
+        lines.contains("country") && lines.contains("americans"),
+        "{lines}"
+    );
     Ok(())
 }

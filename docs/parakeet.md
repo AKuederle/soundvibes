@@ -43,3 +43,19 @@ For user-local headers, also set `CPLUS_INCLUDE_PATH=PREFIX/include` because the
 pinned ggml build discovers the CMake package but expects headers on the compiler
 include path. CPU-only builds use
 `cargo build --workspace --no-default-features --release`.
+
+Live inference is enabled by default. Set `parakeet_streaming = false` or
+`--parakeet-streaming false` for offline-only operation, useful on slower CPUs.
+Live sessions keep decoder state and overlapping encoder windows during recording,
+then finalize on release. Defaults are 5.6 seconds left context, 1.04 seconds chunk
+and 1.04 seconds right context. This requires lookahead and is not immediate
+word-by-word output. Only the final transcript enters the existing output path.
+
+Live recordings finalize once per hold, bypassing pause/duration segmentation.
+SoundVibes retains the full recording for offline retry, about 3.84 MB per minute
+at 16 kHz float32. Begin/feed/finalize failures produce a warning and retry the
+whole recording offline. Failed companion processes are reaped and restarted for
+the retry. Disabling streaming retains existing offline VAD segmentation.
+Vocabulary refreshes at stream begin and again before an offline retry; edits
+during a recording apply to the next recording. No-speech cancellation discards
+the stream. Shutdown finalizes the active recording and drains ordered results.

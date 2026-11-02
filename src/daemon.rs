@@ -30,6 +30,7 @@ use crate::types::{AudioHost, OutputFormat, VadMode};
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub engine: InferenceEngine,
+    pub parakeet_streaming: bool,
     pub parakeet_backend: crate::parakeet::ParakeetBackend,
     pub phonon2_library_dir: Option<PathBuf>,
     pub vocabulary_dir: Option<PathBuf>,
@@ -238,7 +239,15 @@ impl ActiveRecording {
         vad: &audio::VadConfig,
         output: &mut dyn DaemonOutput,
     ) -> Result<(), AppError> {
+        let previous = self.buffer.len();
         self.capture.drain(&mut self.buffer);
+        if live_streaming(config) {
+            if audio::trim_trailing_silence(&self.buffer, config.sample_rate, vad).is_empty() {
+                return worker.cancel_stream();
+            }
+            worker.feed_stream(self.buffer[previous..].to_vec())?;
+            return submit_segment(worker, config, &self.buffer, false, output);
+        }
         submit_final_recording(
             worker,
             config,
@@ -348,7 +357,12 @@ pub fn run_daemon_loop(
                 ControlEvent::StartRecording => {
                     if recording.is_none() {
                         match ActiveRecording::start(deps, &host, config, output) {
-                            Ok(active) => recording = Some(active),
+                            Ok(active) => {
+                                if live_streaming(config) {
+                                    worker.begin_stream(Some(config.language.clone()))?;
+                                }
+                                recording = Some(active);
+                            }
                             Err(err) if respond_to.is_some() => {
                                 acknowledge_error(respond_to.as_ref(), &err);
                                 continue;
@@ -427,6 +441,9 @@ pub fn run_daemon_loop(
             let prev_len = active.buffer.len();
             active.capture.drain(&mut active.buffer);
             let new_samples = active.buffer.len() - prev_len;
+            if live_streaming(config) && new_samples > 0 {
+                worker.feed_stream(active.buffer[prev_len..].to_vec())?;
+            }
 
             // Check for speech in new samples
             if new_samples > 0 {
@@ -441,7 +458,7 @@ pub fn run_daemon_loop(
                     active.speech_detector.process(new_audio);
                 }
 
-                if config.vad == VadMode::Continuous {
+                if config.vad == VadMode::Continuous && !live_streaming(config) {
                     if rms < config.vad_threshold {
                         active.trailing_silence_samples += new_samples;
                     } else {
@@ -489,6 +506,7 @@ pub fn run_daemon_loop(
                 && (active.started.elapsed().as_millis() as u64) >= config.no_speech_timeout_ms
             {
                 recording = None;
+                worker.cancel_stream()?;
                 output.stdout("No speech detected, cancelled.");
                 if config.audio_feedback {
                     feedback::play_stop_sound();
@@ -541,6 +559,7 @@ fn reload_model(
         return Err(AppError::config("set-model changes Whisper sizes; restart the daemon to change the engine or model path"));
     }
     if recording.take().is_some() {
+        worker.cancel_stream()?;
         output.stdout("Recording stopped for model reload.");
     }
     wait_for_pending_results(worker, config, output, last_emitted_transcript);
@@ -554,6 +573,10 @@ fn reload_model(
     Ok(format!(
         "Model reloaded: size={size}, model-language={model_language}"
     ))
+}
+
+fn live_streaming(config: &DaemonConfig) -> bool {
+    config.engine == InferenceEngine::Parakeet && config.parakeet_streaming
 }
 
 fn submit_final_recording(
@@ -1075,6 +1098,7 @@ pub mod test_support {
     pub fn daemon_config() -> DaemonConfig {
         DaemonConfig {
             engine: crate::inference::InferenceEngine::Whisper,
+            parakeet_streaming: true,
             parakeet_backend: Default::default(),
             phonon2_library_dir: None,
             vocabulary_dir: None,
@@ -1274,6 +1298,41 @@ mod tests {
     use super::test_support::{
         daemon_config, TestAudioBackend, TestOutput, TestTranscriberFactory,
     };
+
+    #[test]
+    fn silent_live_release_cancels_instead_of_decoding() -> Result<(), AppError> {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(ControlEvent::StartRecording).unwrap();
+        sender.send(ControlEvent::StopRecording).unwrap();
+        sender.send(ControlEvent::Stop).unwrap();
+        let config = DaemonConfig {
+            engine: InferenceEngine::Parakeet,
+            vad: VadMode::On,
+            ..daemon_config()
+        };
+        let deps = DaemonDeps {
+            audio: Box::new(TestAudioBackend::new(
+                vec!["Mic".into()],
+                vec![vec![0.0; 160]],
+            )),
+            transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
+                "unexpected decode".into()
+            ])),
+        };
+        let mut output = TestOutput::default();
+        run_daemon_loop(
+            &config,
+            &deps,
+            &mut output,
+            receiver,
+            &AtomicBool::new(false),
+        )?;
+        assert!(!output
+            .stdout_lines()
+            .iter()
+            .any(|line| line.contains("unexpected decode")));
+        Ok(())
+    }
 
     #[test]
     fn daemon_loop_emits_transcript_to_output() -> Result<(), AppError> {

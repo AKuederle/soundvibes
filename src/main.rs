@@ -27,6 +27,9 @@ struct Cli {
     #[arg(long, default_value = "auto", global = true)]
     parakeet_backend: sv::parakeet::ParakeetBackend,
 
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, global = true)]
+    parakeet_streaming: bool,
+
     #[arg(long, value_name = "DIRECTORY", global = true)]
     phonon2_library_dir: Option<PathBuf>,
 
@@ -371,6 +374,11 @@ impl Config {
             model_language,
             daemon: daemon::DaemonConfig {
                 engine,
+                parakeet_streaming: sources.value(
+                    "parakeet_streaming",
+                    cli.parakeet_streaming,
+                    file.parakeet_streaming,
+                ),
                 parakeet_backend: sources.value(
                     "parakeet_backend",
                     cli.parakeet_backend,
@@ -410,6 +418,7 @@ impl Config {
 struct FileConfig {
     engine: Option<InferenceEngine>,
     parakeet_backend: Option<sv::parakeet::ParakeetBackend>,
+    parakeet_streaming: Option<bool>,
     phonon2_library_dir: Option<PathBuf>,
     vocabulary_dir: Option<PathBuf>,
     model: Option<PathBuf>,
@@ -903,6 +912,22 @@ mod tests {
                 toml::from_str(text).expect("config"),
             );
             assert_eq!(config.daemon.vocabulary_dir, Some(PathBuf::from(expected)));
+        }
+    }
+
+    #[test]
+    fn parakeet_streaming_can_be_disabled_in_toml_and_overridden() {
+        for (args, expected) in [
+            (vec!["sv"], false),
+            (vec!["sv", "--parakeet-streaming", "true"], true),
+        ] {
+            let matches = Cli::command().try_get_matches_from(args).unwrap();
+            let config = Config::from_sources(
+                Cli::from_arg_matches(&matches).unwrap(),
+                &matches,
+                toml::from_str("parakeet_streaming = false").unwrap(),
+            );
+            assert_eq!(config.daemon.parakeet_streaming, expected);
         }
     }
 

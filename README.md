@@ -161,7 +161,7 @@ It requires 16 kHz mono audio and runs on CPU. `model_size`, `model_language` an
 `download_model` apply to Whisper. Phonon-2 uses the separate setup command;
 startup reports missing assets without downloading a Whisper model. Restart the
 daemon to change engines. `daemon set-model` changes Whisper sizes and is rejected
-by a Phonon-2 daemon without interrupting a recording.
+by a Phonon-2 or Parakeet daemon without interrupting a recording.
 
 The dedicated [phonon2 crate](crates/phonon2/README.md) documents its API, native
 library provenance, and reproducible real-audio/Python comparison tests.

@@ -64,9 +64,10 @@ This PRD is a living document and should be updated as product requirements and 
 ## Model Choice
 - Default engine: whisper.cpp through FFI.
 - Optional engine: Phonon-2, using the original Fermion Research weights and native CPU encoder/TDT decoder. English only, 16 kHz mono; no Python runtime dependency.
+- Optional Parakeet Unified EN 0.6B: transcribe.cpp companion with local Vulkan/CPU inference, live begin/feed/finalize, vocabulary bias and full-clip offline fallback. English only, 16 kHz mono. See [parakeet.md](parakeet.md).
 - Default model: small general (ggml).
 - Model is downloaded on demand to a default location and loaded locally.
-- Phonon-2 assets are prepared separately with a pinned setup script. Restart the daemon to change engines; Whisper size reloads are rejected while Phonon-2 is selected.
+- Phonon-2 assets are prepared separately with a pinned setup script. Restart the daemon to change engines; Whisper size reloads are rejected while Phonon-2 or Parakeet is selected.
 
 ## Performance Assumptions
 - Best-effort latency on CPU for a small model.

@@ -21,7 +21,7 @@ use crate::hotkey::{self, HotkeyConfig};
 use crate::inference::{InferenceEngine, InferenceFactory};
 use crate::output::{self, OutputConfig, OutputMode};
 use crate::segmentation::{self, CutReason, SegmentConfig, SegmentDecision};
-pub use crate::transcription_worker::Transcriber;
+pub use crate::transcription_worker::{StreamingTranscriber, Transcriber};
 use crate::transcription_worker::{TranscriptionJob, TranscriptionResult, TranscriptionWorker};
 use crate::types::{AudioHost, OutputFormat, VadMode};
 

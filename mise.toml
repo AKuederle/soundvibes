@@ -7,7 +7,7 @@ VK_LAYER_PATH = "{{ env.HOME }}/.local/share/vulkan-sdk/current/x86_64/etc/vulka
 
 [tasks.run-local]
 description = "Run sv with local model"
-run = "cargo build --workspace && cargo run --"
+run = "cargo run --"
 
 [tasks.ci]
 description = "Run full CI quality gates"
@@ -32,7 +32,7 @@ fi
 case "${ID}" in
   ubuntu|debian)
     sudo apt update
-    sudo apt install -y build-essential cmake pkg-config libasound2-dev libudev-dev libvulkan1 libvulkan-dev glslang-tools xz-utils curl clang libclang-dev spirv-headers
+    sudo apt install -y build-essential cmake pkg-config libasound2-dev libudev-dev libvulkan1 libvulkan-dev glslang-tools xz-utils curl spirv-headers
 
     sdk_base="${HOME}/.local/share/vulkan-sdk"
     sdk_version="${VULKAN_SDK_VERSION:-1.4.335.0}"

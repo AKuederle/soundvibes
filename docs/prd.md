@@ -62,7 +62,7 @@ This PRD is a living document and should be updated as product requirements and 
 ## Model Choice
 - Default engine: Parakeet Unified English 0.6B.
 - Optional engine: Phonon-2, using the original Fermion Research weights and native CPU encoder/TDT decoder. English only, 16 kHz mono; no Python runtime dependency.
-- Parakeet Unified EN 0.6B: transcribe.cpp companion with local Vulkan/CPU inference, live begin/feed/finalize, vocabulary bias and full-clip offline fallback. English only, 16 kHz mono. See [parakeet.md](parakeet.md).
+- Parakeet Unified EN 0.6B: transcribe.cpp in the single `sv` executable with local Vulkan/CPU inference, live begin/feed/finalize, vocabulary bias and full-clip offline fallback. English only, 16 kHz mono. See [parakeet.md](parakeet.md).
 - Default model: Parakeet Unified EN 0.6B Q8_0 GGUF.
 - Assets are prepared explicitly with pinned setup scripts and loaded locally.
 

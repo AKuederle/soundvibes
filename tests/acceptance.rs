@@ -9,7 +9,6 @@ use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -1384,43 +1383,29 @@ fn parakeet_real_asset_offline() -> Result<(), Box<dyn Error>> {
         eprintln!("skip AT-38: set SV_PARAKEET_MODEL to a verified Unified EN GGUF");
         return Ok(());
     };
-    let helper = PathBuf::from(env!("CARGO_BIN_EXE_sv")).with_file_name("sv-parakeet");
-    let mut child = Command::new(helper)
-        .arg(model)
-        .arg(env::var("SV_PARAKEET_BACKEND").unwrap_or_else(|_| "cpu".into()))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
-    let mut output = BufReader::new(child.stdout.take().unwrap());
-    let mut line = String::new();
-    assert!(
-        output.read_line(&mut line)? > 0,
-        "companion failed loading model"
-    );
+    use sv::daemon::Transcriber;
+    let backend = if env::var("SV_PARAKEET_BACKEND").as_deref() == Ok("vulkan") {
+        sv::parakeet::ParakeetBackend::Vulkan
+    } else {
+        sv::parakeet::ParakeetBackend::Cpu
+    };
+    let mut transcriber = sv::parakeet::ParakeetTranscriber::load(&PathBuf::from(model), backend)?;
+    transcriber.set_vocabulary(&["TanStack".into(), "shadcn".into()])?;
     let mut wav = hound::WavReader::open("tests/fixtures/jfk.wav")?;
     let samples: Vec<f32> = wav
         .samples::<i16>()
         .map(|s| s.map(|v| v as f32 / 32768.0))
         .collect::<Result<_, _>>()?;
-    let mut input = child.stdin.take().unwrap();
-    writeln!(
-        input,
-        "{}",
-        serde_json::json!({"op":"offline", "samples":samples, "vocabulary":["TanStack", "shadcn"]})
-    )?;
-    line.clear();
-    output.read_line(&mut line)?;
-    let reply: serde_json::Value = serde_json::from_str(&line)?;
-    let text = reply["text"]
-        .as_str()
-        .expect("successful offline transcript")
-        .to_lowercase();
+    // Cancel an active native session, then reuse its model/session offline.
+    {
+        let mut stream = transcriber.begin_stream(Some("en"))?.expect("live session");
+        stream.feed(&samples[..1600])?;
+    }
+    let text = transcriber.transcribe(&samples, Some("en"))?.to_lowercase();
     assert!(
         text.contains("country") && text.contains("americans"),
         "{text}"
     );
-    drop(input);
-    assert!(child.wait()?.success());
     Ok(())
 }
 

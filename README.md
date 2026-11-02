@@ -4,12 +4,11 @@ SoundVibes (`sv`) is a personal, offline speech-to-text CLI for Linux. It record
 
 ## Build and install
 
-Prepare build dependencies and install both executables with Cargo:
+Prepare build dependencies and install SoundVibes with Cargo:
 
 ```bash
 mise run prepare-dev
 cargo install --path .
-cargo install --path crates/sv-parakeet
 ```
 
 `mise run prepare-dev` currently supports Debian/Ubuntu and Arch-family systems. The binary expects Linux x86_64, ALSA, libudev, and optionally Vulkan for GPU acceleration.

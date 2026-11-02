@@ -10,17 +10,19 @@ pub trait Transcriber: Send {
     /// On error, retain the previous setting so dictation can continue.
     fn set_vocabulary(&mut self, words: &[String]) -> Result<Option<String>, AppError>;
     fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String, AppError>;
-    /// Return false to use offline recognition for this recording.
-    fn begin_stream(&mut self, _language: Option<&str>) -> Result<bool, AppError> {
-        Ok(false)
+    /// Borrow a live session until finish or drop. None selects offline recognition.
+    fn begin_stream(
+        &mut self,
+        _language: Option<&str>,
+    ) -> Result<Option<Box<dyn StreamingTranscriber + '_>>, AppError> {
+        Ok(None)
     }
-    fn feed_stream(&mut self, _samples: &[f32]) -> Result<(), AppError> {
-        Ok(())
-    }
-    fn finish_stream(&mut self) -> Result<String, AppError> {
-        Err(AppError::runtime("streaming unavailable"))
-    }
-    fn cancel_stream(&mut self) {}
+}
+
+/// A recording-scoped session. Dropping it cancels and releases native state.
+pub trait StreamingTranscriber {
+    fn feed(&mut self, samples: &[f32]) -> Result<(), AppError>;
+    fn finish(&mut self) -> Result<String, AppError>;
 }
 
 pub struct TranscriptionJob {
@@ -61,78 +63,60 @@ impl TranscriptionWorker {
 
         let handle = thread::spawn(move || {
             let mut vocabulary = Vocabulary::new(vocabulary_dir);
-            let mut streaming = false;
-            let mut stream_warnings = Vec::new();
             while let Ok(command) = job_receiver.recv() {
-                match command {
+                let pending = match command {
                     WorkerCommand::Begin(language) => {
-                        transcriber.cancel_stream();
-                        stream_warnings = refresh_vocabulary(&mut vocabulary, transcriber.as_mut());
-                        streaming = match transcriber.begin_stream(language.as_deref()) {
-                            Ok(active) => active,
+                        let mut warnings =
+                            refresh_vocabulary(&mut vocabulary, transcriber.as_mut());
+                        let stream = match transcriber.begin_stream(language.as_deref()) {
+                            Ok(stream) => stream,
                             Err(error) => {
-                                stream_warnings.push(format!(
+                                warnings.push(format!(
                                     "stream begin: {error}; using offline recognition"
                                 ));
-                                false
+                                None
                             }
                         };
-                    }
-                    WorkerCommand::Feed(samples) => {
-                        if streaming {
-                            if let Err(error) = transcriber.feed_stream(&samples) {
-                                stream_warnings.push(format!(
-                                    "stream feed: {error}; using offline recognition"
-                                ));
-                                transcriber.cancel_stream();
-                                streaming = false;
-                            }
+                        // The session borrow ends before any offline retry uses the transcriber.
+                        match receive_stream(&job_receiver, stream, warnings) {
+                            StreamOutcome::Ready(pending) => pending,
+                            StreamOutcome::Cancelled => continue,
+                            StreamOutcome::Shutdown => break,
                         }
                     }
-                    WorkerCommand::Cancel => {
-                        transcriber.cancel_stream();
-                        streaming = false;
-                        stream_warnings.clear();
+                    WorkerCommand::Transcribe { index, job } => PendingTranscription {
+                        index,
+                        job,
+                        text: None,
+                        warnings: Vec::new(),
+                    },
+                    WorkerCommand::Shutdown => break,
+                    WorkerCommand::Cancel | WorkerCommand::Feed(_) => continue,
+                };
+                let PendingTranscription {
+                    index,
+                    job,
+                    text,
+                    mut warnings,
+                } = pending;
+                let transcript = match text {
+                    Some(text) => Ok(text),
+                    None => {
+                        warnings.extend(refresh_vocabulary(&mut vocabulary, transcriber.as_mut()));
+                        transcriber.transcribe(&job.samples, job.language.as_deref())
                     }
-
-                    WorkerCommand::Transcribe { index, job } => {
-                        let mut warnings = std::mem::take(&mut stream_warnings);
-                        let transcript = if streaming {
-                            streaming = false;
-                            match transcriber.finish_stream() {
-                                Ok(text) => Ok(text),
-                                Err(error) => {
-                                    warnings.push(format!(
-                                        "stream finish: {error}; using offline recognition"
-                                    ));
-                                    transcriber.cancel_stream();
-                                    warnings.extend(refresh_vocabulary(
-                                        &mut vocabulary,
-                                        transcriber.as_mut(),
-                                    ));
-                                    transcriber.transcribe(&job.samples, job.language.as_deref())
-                                }
-                            }
-                        } else {
-                            warnings
-                                .extend(refresh_vocabulary(&mut vocabulary, transcriber.as_mut()));
-                            transcriber.transcribe(&job.samples, job.language.as_deref())
-                        };
-                        let result = TranscriptionResult {
-                            index,
-                            duration_ms: job.duration_ms,
-                            transcript,
-                            had_overlap: job.had_overlap,
-                            warnings,
-                        };
-                        if result_sender.send(result).is_err() {
-                            break;
-                        }
-                    }
-                    WorkerCommand::Shutdown => {
-                        transcriber.cancel_stream();
-                        break;
-                    }
+                };
+                if result_sender
+                    .send(TranscriptionResult {
+                        index,
+                        duration_ms: job.duration_ms,
+                        transcript,
+                        had_overlap: job.had_overlap,
+                        warnings,
+                    })
+                    .is_err()
+                {
+                    break;
                 }
             }
         });
@@ -198,6 +182,57 @@ impl TranscriptionWorker {
     }
 }
 
+struct PendingTranscription {
+    index: u64,
+    job: TranscriptionJob,
+    text: Option<String>,
+    warnings: Vec<String>,
+}
+enum StreamOutcome {
+    Ready(PendingTranscription),
+    Cancelled,
+    Shutdown,
+}
+
+fn receive_stream(
+    commands: &Receiver<WorkerCommand>,
+    mut stream: Option<Box<dyn StreamingTranscriber + '_>>,
+    mut warnings: Vec<String>,
+) -> StreamOutcome {
+    while let Ok(command) = commands.recv() {
+        match command {
+            WorkerCommand::Feed(samples) => {
+                if let Some(active) = stream.as_mut() {
+                    if let Err(error) = active.feed(&samples) {
+                        warnings.push(format!("stream feed: {error}; using offline recognition"));
+                        stream = None;
+                    }
+                }
+            }
+            WorkerCommand::Transcribe { index, job } => {
+                let text = stream.as_mut().and_then(|active| match active.finish() {
+                    Ok(text) => Some(text),
+                    Err(error) => {
+                        warnings.push(format!("stream finish: {error}; using offline recognition"));
+                        None
+                    }
+                });
+                return StreamOutcome::Ready(PendingTranscription {
+                    index,
+                    job,
+                    text,
+                    warnings,
+                });
+            }
+            WorkerCommand::Cancel => return StreamOutcome::Cancelled,
+            WorkerCommand::Shutdown => return StreamOutcome::Shutdown,
+            // Begin is only sent when no recording is active.
+            WorkerCommand::Begin(_) => return StreamOutcome::Cancelled,
+        }
+    }
+    StreamOutcome::Shutdown
+}
+
 fn refresh_vocabulary(
     vocabulary: &mut Vocabulary,
     transcriber: &mut dyn Transcriber,
@@ -225,7 +260,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use super::{Transcriber, TranscriptionJob, TranscriptionWorker};
+    use super::{StreamingTranscriber, Transcriber, TranscriptionJob, TranscriptionWorker};
     use crate::error::AppError;
 
     struct StreamTranscriber {
@@ -240,25 +275,28 @@ mod tests {
         fn transcribe(&self, samples: &[f32], _: Option<&str>) -> Result<String, AppError> {
             Ok(format!("offline:{samples:?}"))
         }
-        fn begin_stream(&mut self, _: Option<&str>) -> Result<bool, AppError> {
+        fn begin_stream(
+            &mut self,
+            _: Option<&str>,
+        ) -> Result<Option<Box<dyn StreamingTranscriber + '_>>, AppError> {
             self.seen.clear();
-            Ok(true)
+            Ok(Some(Box::new(TestStream(self))))
         }
-        fn feed_stream(&mut self, samples: &[f32]) -> Result<(), AppError> {
-            if self.fail_feed {
+    }
+    struct TestStream<'a>(&'a mut StreamTranscriber);
+    impl StreamingTranscriber for TestStream<'_> {
+        fn feed(&mut self, samples: &[f32]) -> Result<(), AppError> {
+            if self.0.fail_feed {
                 return Err(AppError::runtime("feed failed"));
             }
-            self.seen.extend_from_slice(samples);
-            if let Some(sender) = &self.fed {
+            self.0.seen.extend_from_slice(samples);
+            if let Some(sender) = &self.0.fed {
                 let _ = sender.send(());
             }
             Ok(())
         }
-        fn finish_stream(&mut self) -> Result<String, AppError> {
-            Ok(format!("stream:{:?}", self.seen))
-        }
-        fn cancel_stream(&mut self) {
-            self.seen.clear();
+        fn finish(&mut self) -> Result<String, AppError> {
+            Ok(format!("stream:{:?}", self.0.seen))
         }
     }
     fn job(samples: Vec<f32>) -> TranscriptionJob {
@@ -347,11 +385,25 @@ mod tests {
             fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, AppError> {
                 panic!("cancelled audio must not decode")
             }
-            fn begin_stream(&mut self, _: Option<&str>) -> Result<bool, AppError> {
+            fn begin_stream(
+                &mut self,
+                _: Option<&str>,
+            ) -> Result<Option<Box<dyn StreamingTranscriber + '_>>, AppError> {
                 self.0.store(true, Ordering::SeqCst);
-                Ok(true)
+                Ok(Some(Box::new(ActiveSession(Arc::clone(&self.0)))))
             }
-            fn cancel_stream(&mut self) {
+        }
+        struct ActiveSession(Arc<AtomicBool>);
+        impl StreamingTranscriber for ActiveSession {
+            fn feed(&mut self, _: &[f32]) -> Result<(), AppError> {
+                Ok(())
+            }
+            fn finish(&mut self) -> Result<String, AppError> {
+                panic!("cancelled session must not finish")
+            }
+        }
+        impl Drop for ActiveSession {
+            fn drop(&mut self) {
                 self.0.store(false, Ordering::SeqCst);
             }
         }
@@ -376,14 +428,25 @@ mod tests {
         fn transcribe(&self, samples: &[f32], _: Option<&str>) -> Result<String, AppError> {
             Ok(format!("{samples:?}"))
         }
-        fn begin_stream(&mut self, _: Option<&str>) -> Result<bool, AppError> {
+        fn begin_stream(
+            &mut self,
+            _: Option<&str>,
+        ) -> Result<Option<Box<dyn StreamingTranscriber + '_>>, AppError> {
             if self.fail_begin {
                 Err(AppError::runtime("begin failed"))
+            } else if self.unavailable {
+                Ok(None)
             } else {
-                Ok(!self.unavailable)
+                Ok(Some(Box::new(FailedFinish)))
             }
         }
-        fn finish_stream(&mut self) -> Result<String, AppError> {
+    }
+    struct FailedFinish;
+    impl StreamingTranscriber for FailedFinish {
+        fn feed(&mut self, _: &[f32]) -> Result<(), AppError> {
+            Ok(())
+        }
+        fn finish(&mut self) -> Result<String, AppError> {
             Err(AppError::runtime("finish failed"))
         }
     }

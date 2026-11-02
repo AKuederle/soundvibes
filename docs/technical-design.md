@@ -54,7 +54,6 @@ default backend and Phonon-2 as an optional native CPU backend.
 - Store the socket in `${XDG_RUNTIME_DIR}/soundvibes/sv.sock`.
 - Keep socket commands for daemon lifecycle and external start/stop integration.
 - Return a versioned JSON response after each command is processed; expose `sv daemon status` for recording state and language.
-- Report model reload failures to the requesting client instead of treating a successful socket write as a successful reload.
 
 ### Text Output
 - Use an output mode to select stdout, clipboard, paste, dotool typing, or low-delay ydotool typing.
@@ -83,15 +82,16 @@ default backend and Phonon-2 as an optional native CPU backend.
 - Prepare Phonon-2 assets separately with `scripts/prepare-phonon2.py`. `model` identifies the unpacked directory, and native libraries default to its `native` subdirectory, with `phonon2_library_dir` as an override.
 
 ### Parakeet Unified English
-- `engine = "parakeet"` selects a persistent `sv-parakeet` companion beside `sv`.
-- The companion owns the model/session and exchanges local JSON lines over pipes.
+- `engine = "parakeet"` is the default, using transcribe.cpp inside `sv`.
+- The transcription worker owns the loaded model/session for its lifetime.
   Auto backend permits CPU fallback; explicit CPU and Vulkan are available.
 - The worker serializes begin/feed/finalize with transcription jobs. Capture feeds
   immediately and drains release audio before submitting finalization. Final text
   uses the existing output path. Partial hypotheses never inject keystrokes.
 - Live mode bypasses offline VAD cuts, retaining full audio for offline retry on
   begin/feed/finalize failure. Cancel discards the session; shutdown finalizes an
-  active recording and drains pending results. Pipe IO and replies have timeouts.
+  active recording and drains pending results. A borrowed stream is dropped before
+  any offline retry reuses the session.
 - `parakeet_streaming = false` restores offline segmentation. English/16 kHz are
   required. Model preparation and deployment are in [parakeet.md](parakeet.md).
 

@@ -1216,16 +1216,9 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "toml",
+ "transcribe-cpp",
  "udev",
  "wl-clipboard-rs",
-]
-
-[[package]]
-name = "sv-parakeet"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "transcribe-cpp",
 ]
 
 [[package]]

@@ -102,8 +102,8 @@ These tests validate the product behavior for the offline Linux CLI.
 
 ### AT-12: Daemon commands are acknowledged
 - Setup: start the control socket and daemon loop with test-support audio and transcription adapters.
-- Command: request `status`, request a missing model reload, then request `stop`.
-- Expect: status returns versioned JSON with `state = "idle"` and `language = "en"`; model reload returns its processing error; stop returns success.
+- Command: request `status`, then request `stop`.
+- Expect: status returns versioned JSON with `state = "idle"` and `language = "en"`; stop returns success.
 - Pass: each client receives the daemon loop's response rather than inferring success from the socket write.
 
 ### AT-13: Universal paste and safe typing setup
@@ -166,8 +166,8 @@ These tests validate the product behavior for the offline Linux CLI.
 
 ### AT-38: Parakeet Unified EN offline recognition
 
-`parakeet_real_asset_offline` transcribes the JFK fixture through the persistent
-`sv-parakeet` companion with vocabulary terms. Build both workspace binaries first.
+`parakeet_real_asset_offline` transcribes the JFK fixture through the native Parakeet backend with vocabulary terms. It first cancels a live
+session, then checks offline reuse of that session.
 Set `SV_PARAKEET_MODEL` to the verified Q8_0 GGUF to enable it; unset skips.
 An explicitly configured missing/invalid asset fails. `SV_PARAKEET_BACKEND=cpu`
 is the default for this test; set `vulkan` to exercise the GPU.
@@ -177,7 +177,7 @@ is the default for this test; set `vulkan` to exercise the GPU.
 `parakeet_real_asset_streams_through_daemon` runs the real Parakeet backend through
 capture, worker and daemon final output with vocabulary enabled and continuous VAD.
 It feeds an initial chunk during recording and the remaining JFK audio on release,
-and rejects streaming fallback warnings. Build the companion first, then run
+and rejects streaming fallback warnings. Run
 `SV_PARAKEET_MODEL=PATH cargo test --test acceptance --features test-support parakeet`.
 Set `SV_PARAKEET_BACKEND=vulkan` for GPU validation. Unset model skips cleanly.
 Worker unit tests additionally cover FIFO result order, cancellation, unavailable

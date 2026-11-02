@@ -4,15 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = ["crates/phonon2", "crates/sv-parakeet"]
+members = ["crates/phonon2"]
 resolver = "2"
 
 [features]
 default = ["vulkan"]
 test-support = []
-vulkan = []
+vulkan = ["transcribe-cpp/vulkan"]
 
 [dependencies]
+transcribe-cpp = { version = "=0.4.1", default-features = false }
 phonon2 = { path = "crates/phonon2" }
 clap = { version = "4.5.27", features = ["derive"] }
 cpal = "0.15.3"

@@ -4,10 +4,10 @@ SoundVibes supports NVIDIA Parakeet Unified EN 0.6B through transcribe.cpp
 0.4.1, pinned to Anomaly revision
 `7045d1c0fe7cee37747b2792977421d435e75fca`.
 
-Build both binaries with `cargo build --workspace --release` and keep `sv` and
-`sv-parakeet` beside each other when installing. The persistent companion owns transcribe.cpp model/session state.
-Model inference and IPC remain local. No service restart or installation is part
-of preparing this backend.
+Build the single `sv` executable with `cargo build --release`, or install it with
+`cargo install --path .`. Parakeet runs inside SoundVibes on the transcription
+worker. There is no companion executable or IPC. No service restart or installation
+is part of preparing the backend.
 
 Prepare the Q8_0 asset with `python3 scripts/prepare-parakeet.py`. This verifies
 731357568 bytes and SHA256
@@ -53,8 +53,8 @@ word-by-word output. Only the final transcript enters the existing output path.
 Live recordings finalize once per hold, bypassing pause/duration segmentation.
 SoundVibes retains the full recording for offline retry, about 3.84 MB per minute
 at 16 kHz float32. Begin/feed/finalize failures produce a warning and retry the
-whole recording offline. Failed companion processes are reaped and restarted for
-the retry. Disabling streaming retains existing offline VAD segmentation.
+whole recording offline. The recording-scoped native stream is dropped before the offline retry,
+releasing the session and model compute lease. Disabling streaming retains existing offline VAD segmentation.
 Vocabulary refreshes at stream begin and again before an offline retry; edits
 during a recording apply to the next recording. No-speech cancellation discards
 the stream. Shutdown finalizes the active recording and drains ordered results.

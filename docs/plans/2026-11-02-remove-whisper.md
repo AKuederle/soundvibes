@@ -11,7 +11,10 @@ fixture. Update current product/setup/acceptance documentation. Dated prior plan
 remain historical records, not current backend instructions.
 
 Review units: complete removal with tests and documentation, then executable
-packaging simplification if selected. Verify each unit and commit before the next.
+packaging simplification, confirmed by the user: fold Parakeet into one `sv`.
+The worker borrows a recording-scoped native stream; dropping releases it before
+offline retry. No companion, extra worker thread, self-referential storage, or new
+unsafe application code is needed. Verify each unit and commit before the next.
 Run format, workspace Clippy/tests/release build and configured real Parakeet
 recognition. Close per-commit RoboRev jobs, curate the stack, review the full range,
 then pull/rebase, push main and verify a clean, up-to-date checkout.

@@ -194,4 +194,7 @@ streaming, and begin/feed/finish failures with complete-audio offline fallback.
   fixture and actual model for both cut reasons, rejects fallback/errors, and
   waits for native transcript output before releasing. Set `SV_PARAKEET_MODEL`
   and optionally `SV_PARAKEET_BACKEND=vulkan`; unset model skips gracefully.
+- `at40_live_pause_after_output_does_not_cancel_the_hold` uses a nonzero
+  no-speech timeout, pauses after finalized output, resumes speech without key
+  release, and requires a second segment.
 - Run `cargo test --test acceptance --features test-support at40`.

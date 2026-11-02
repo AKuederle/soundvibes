@@ -63,5 +63,7 @@ segment's complete streamed audio offline. The native stream is dropped before
 retrying, releasing the session and model compute lease. Disabling streaming keeps
 the same continuous pause/duration boundaries with offline inference.
 Vocabulary refreshes before each segment begins and again before an offline retry.
-No-speech cancellation discards the active stream. Shutdown finalizes remaining
+The no-speech timeout applies to the initial wait for speech in a hold; later
+pauses after recognized speech do not cancel capture. No-speech cancellation
+discards the active stream. Shutdown finalizes remaining
 audio and drains ordered results.

@@ -21,3 +21,9 @@ carry and release deduplication; asset-gated native pre-release output; docs upd
 Verify format/Clippy/workspace tests/release build, close per-commit RoboRev,
 review full task range, push, install verified binary and restart the already
 configured Parakeet Vulkan service. Preserve F24, ydotool and personal config.
+
+Final review 18415 exposed a hold-lifetime issue in reused segmentation state:
+resetting the no-speech detector/timer after a cut cancels capture during a later
+pause. A red/green timed acceptance test now requires resumed speech after output
+with a nonzero timeout. Keep startup detection scoped to the complete hold. This
+correction remains an additional commit after final review, without rewriting.

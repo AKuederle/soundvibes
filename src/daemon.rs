@@ -478,8 +478,8 @@ pub fn run_daemon_loop(
                             }
                         }
                         active.trailing_silence_samples = 0;
-                        active.speech_detector.reset();
-                        active.started = std::time::Instant::now();
+                        // Speech detection and startup timeout belong to the whole hold,
+                        // not the segment. A later pause must not cancel resumed speech.
                     }
                 }
             }
@@ -1072,6 +1072,7 @@ pub mod test_support {
         }
     }
 
+    #[derive(Clone)]
     pub struct TestAudioBackend {
         devices: Vec<String>,
         chunks: Arc<Mutex<VecDeque<Vec<f32>>>>,
@@ -1079,6 +1080,13 @@ pub mod test_support {
     }
 
     impl TestAudioBackend {
+        pub fn push_samples(&self, samples: Vec<f32>) {
+            self.chunks
+                .lock()
+                .expect("audio chunk lock")
+                .push_back(samples);
+        }
+
         pub fn new(devices: Vec<String>, chunks: Vec<Vec<f32>>) -> Self {
             Self {
                 devices,

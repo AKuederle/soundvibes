@@ -1765,3 +1765,63 @@ fn at40_real_parakeet_outputs_on_pause_and_duration_before_release() -> Result<(
     }
     Ok(())
 }
+
+#[cfg(feature = "test-support")]
+#[test]
+fn at40_live_pause_after_output_does_not_cancel_the_hold() -> Result<(), Box<dyn Error>> {
+    let audio = TestAudioBackend::new(vec!["Fixture".into()], Vec::new());
+    let producer = audio.clone();
+    let deps = DaemonDeps {
+        audio: Box::new(audio),
+        transcriber_factory: Box::new(LiveOnlyFactory("spoken segment")),
+    };
+    let config = DaemonConfig {
+        engine: sv::inference::InferenceEngine::Parakeet,
+        vad: VadMode::Continuous,
+        no_speech_timeout_ms: 200,
+        vad_silence_ms: 20,
+        vad_chunk_ms: 20,
+        segment_min_ms: 20,
+        ..daemon_config()
+    };
+    let (sender, receiver) = mpsc::channel();
+    let (transcript_sender, transcript_receiver) = mpsc::channel();
+    let controller = thread::spawn(move || -> Result<(), String> {
+        acknowledge(&sender, ControlEvent::StartRecording)?;
+        let speak = || {
+            producer.push_samples(vec![0.2; 1600]);
+            producer.push_samples(vec![0.0; 320]);
+        };
+        speak();
+        transcript_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|e| e.to_string())?;
+        thread::sleep(Duration::from_millis(350));
+        speak();
+        let resumed = transcript_receiver.recv_timeout(Duration::from_secs(2));
+        acknowledge(&sender, ControlEvent::StopRecording)?;
+        acknowledge(&sender, ControlEvent::Stop)?;
+        resumed.map_err(|e| format!("resumed speech was lost while the hotkey stayed held: {e}"))
+    });
+    let mut output = TranscriptSignalOutput {
+        errors: Vec::new(),
+        lines: Vec::new(),
+        transcript_sender,
+        transcript_marker: ": spoken segment",
+    };
+    sv::daemon::run_daemon_loop(
+        &config,
+        &deps,
+        &mut output,
+        receiver,
+        &AtomicBool::new(false),
+    )?;
+    controller.join().unwrap()?;
+    assert!(
+        !output.lines.iter().any(|line| line.contains("cancelled")),
+        "{:?}",
+        output.lines
+    );
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
+    Ok(())
+}

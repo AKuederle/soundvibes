@@ -62,14 +62,14 @@ These tests validate the product behavior for the offline Linux CLI.
 - Pass: JSONL lines parse and include required fields.
 
 ### AT-05a: Continuous hold-to-record pause transcription
-- Setup: set `parakeet_streaming = false` and `vad = "continuous"` and configure `[hotkey] key = "RIGHTCTRL"`.
+- Setup: set `vad = "continuous"` and configure `[hotkey] key = "RIGHTCTRL"`.
 - Command: `sv daemon start`.
 - Action: hold the configured key, speak one sentence, pause without releasing, then speak another sentence.
 - Expect: the first sentence is transcribed after the pause while the key is still held.
 - Pass: output appears after the pause and recording continues until key release.
 
 ### AT-05b: Continuous long-speech timed segmentation
-- Setup: set `parakeet_streaming = false` and `vad = "continuous"` with default segment timing or explicit `segment_target_ms`, `segment_grace_ms`, `segment_overlap_ms`, and `segment_min_ms`.
+- Setup: set `vad = "continuous"` with default segment timing or explicit `segment_target_ms`, `segment_grace_ms`, `segment_overlap_ms`, and `segment_min_ms`.
 - Command: `sv daemon start`.
 - Action: hold the configured key and keep speaking past the segment target without a full silence break.
 - Expect: SoundVibes starts transcribing a timed segment while audio capture continues.
@@ -182,3 +182,16 @@ and rejects streaming fallback warnings. Run
 Set `SV_PARAKEET_BACKEND=vulkan` for GPU validation. Unset model skips cleanly.
 Worker unit tests additionally cover FIFO result order, cancellation, unavailable
 streaming, and begin/feed/finish failures with complete-audio offline fallback.
+
+### AT-40: Continuous output with live Parakeet
+
+- `at40_live_stream_outputs_on_pause_before_release` and
+  `at40_live_stream_outputs_during_long_speech` require finalized streaming output
+  before sending key release. Their engine adapter rejects offline fallback.
+- `at40_live_timed_overlap_is_fed_and_deduped_on_release` verifies exact audio
+  delivery across timed cuts and removes repeated words from the release tail.
+- `at40_real_parakeet_outputs_on_pause_and_duration_before_release` uses the JFK
+  fixture and actual model for both cut reasons, rejects fallback/errors, and
+  waits for native transcript output before releasing. Set `SV_PARAKEET_MODEL`
+  and optionally `SV_PARAKEET_BACKEND=vulkan`; unset model skips gracefully.
+- Run `cargo test --test acceptance --features test-support at40`.

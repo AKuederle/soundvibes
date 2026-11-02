@@ -45,16 +45,23 @@ include path. CPU-only builds use
 
 Live inference is enabled by default. Set `parakeet_streaming = false` or
 `--parakeet-streaming false` for offline-only operation, useful on slower CPUs.
-Live sessions keep decoder state and overlapping encoder windows during recording,
-then finalize on release. Defaults are 5.6 seconds left context, 1.04 seconds chunk
-and 1.04 seconds right context. This requires lookahead and is not immediate
-word-by-word output. Only the final transcript enters the existing output path.
+Live sessions keep decoder state and overlapping encoder windows while capturing
+one segment. With `vad = "continuous"`, a pause or duration limit finalizes that
+segment and outputs its text while the key is still held. The next stream starts
+immediately. Timed cuts carry `segment_overlap_ms` of audio and deduplicate repeated
+boundary words, including the last segment emitted on release. Default segment
+target/grace are 10/2 seconds; pause detection uses `vad_silence_ms` and
+`segment_min_ms`. Other VAD modes finalize on release.
 
-Live recordings finalize once per hold, bypassing pause/duration segmentation.
-SoundVibes retains the full recording for offline retry, about 3.84 MB per minute
+Native encoder contexts default to 5.6 seconds left, 1.04 seconds chunk and 1.04
+seconds right. This requires lookahead and is not immediate word-by-word output.
+Only finalized segment text enters the existing output path.
+
+SoundVibes retains the current segment for offline retry, about 3.84 MB per minute
 at 16 kHz float32. Begin/feed/finalize failures produce a warning and retry the
-whole recording offline. The recording-scoped native stream is dropped before the offline retry,
-releasing the session and model compute lease. Disabling streaming retains existing offline VAD segmentation.
-Vocabulary refreshes at stream begin and again before an offline retry; edits
-during a recording apply to the next recording. No-speech cancellation discards
-the stream. Shutdown finalizes the active recording and drains ordered results.
+segment's complete streamed audio offline. The native stream is dropped before
+retrying, releasing the session and model compute lease. Disabling streaming keeps
+the same continuous pause/duration boundaries with offline inference.
+Vocabulary refreshes before each segment begins and again before an offline retry.
+No-speech cancellation discards the active stream. Shutdown finalizes remaining
+audio and drains ordered results.

@@ -88,11 +88,13 @@ default backend and Phonon-2 as an optional native CPU backend.
 - The worker serializes begin/feed/finalize with transcription jobs. Capture feeds
   immediately and drains release audio before submitting finalization. Final text
   uses the existing output path. Partial hypotheses never inject keystrokes.
-- Live mode bypasses offline VAD cuts, retaining full audio for offline retry on
+- Continuous live mode finalizes on pause/duration cuts, begins the next stream
+  with carried audio overlap, and deduplicates boundary text, including release.
+  It retains the current segment for offline retry on
   begin/feed/finalize failure. Cancel discards the session; shutdown finalizes an
   active recording and drains pending results. A borrowed stream is dropped before
   any offline retry reuses the session.
-- `parakeet_streaming = false` restores offline segmentation. English/16 kHz are
+- `parakeet_streaming = false` uses offline inference at the same boundaries. English/16 kHz are
   required. Model preparation and deployment are in [parakeet.md](parakeet.md).
 
 ### Live vocabulary

@@ -74,6 +74,57 @@ impl sv::daemon::TranscriberFactory for VocabularyFactory {
 }
 
 #[cfg(feature = "test-support")]
+struct LiveOnlyFactory(&'static str);
+#[cfg(feature = "test-support")]
+impl sv::daemon::TranscriberFactory for LiveOnlyFactory {
+    fn load(
+        &self,
+        _: Option<&std::path::Path>,
+    ) -> Result<Box<dyn sv::daemon::Transcriber>, AppError> {
+        Ok(Box::new(LiveOnlyTranscriber(self.0)))
+    }
+}
+#[cfg(feature = "test-support")]
+struct LiveOnlyTranscriber(&'static str);
+#[cfg(feature = "test-support")]
+impl sv::daemon::Transcriber for LiveOnlyTranscriber {
+    fn set_vocabulary(&mut self, _: &[String]) -> Result<Option<String>, AppError> {
+        Ok(None)
+    }
+    fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, AppError> {
+        Err(AppError::runtime("unexpected offline fallback"))
+    }
+    fn begin_stream(
+        &mut self,
+        _: Option<&str>,
+    ) -> Result<Option<Box<dyn sv::daemon::StreamingTranscriber + '_>>, AppError> {
+        Ok(Some(Box::new(LiveOnlySession {
+            text: self.0,
+            received: 0,
+        })))
+    }
+}
+#[cfg(feature = "test-support")]
+struct LiveOnlySession {
+    text: &'static str,
+    received: usize,
+}
+#[cfg(feature = "test-support")]
+impl sv::daemon::StreamingTranscriber for LiveOnlySession {
+    fn feed(&mut self, samples: &[f32]) -> Result<(), AppError> {
+        self.received += samples.len();
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<String, AppError> {
+        Ok(if self.received == 0 {
+            String::new()
+        } else {
+            self.text.into()
+        })
+    }
+}
+
+#[cfg(feature = "test-support")]
 fn acknowledge(sender: &mpsc::Sender<ControlEvent>, event: ControlEvent) -> Result<(), String> {
     acknowledge_with_timeout(sender, event, Duration::from_secs(5))
 }
@@ -600,11 +651,21 @@ fn at05_jsonl_output_formatting() -> Result<(), Box<dyn Error>> {
 #[cfg(feature = "test-support")]
 #[test]
 fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(), Box<dyn Error>> {
+    continuous_pause_case(false)
+}
+#[cfg(feature = "test-support")]
+#[test]
+fn at40_live_stream_outputs_on_pause_before_release() -> Result<(), Box<dyn Error>> {
+    continuous_pause_case(true)
+}
+#[cfg(feature = "test-support")]
+fn continuous_pause_case(live: bool) -> Result<(), Box<dyn Error>> {
     let (sender, receiver) = mpsc::channel();
     let control_sender = sender.clone();
     let (transcript_sender, transcript_receiver) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut output = TranscriptSignalOutput {
+        errors: Vec::new(),
         lines: Vec::new(),
         transcript_sender,
         transcript_marker: "Transcript 1: pause transcript",
@@ -614,11 +675,18 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
             vec!["Mic".to_string()],
             vec![vec![0.2; 160], vec![0.0; 400]],
         )),
-        transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
-            "pause transcript".to_string()
-        ])),
+        transcriber_factory: if live {
+            Box::new(LiveOnlyFactory("pause transcript"))
+        } else {
+            Box::new(TestTranscriberFactory::new(vec!["pause transcript".into()]))
+        },
     };
     let config = DaemonConfig {
+        engine: if live {
+            sv::inference::InferenceEngine::Parakeet
+        } else {
+            sv::inference::InferenceEngine::Phonon2
+        },
         vad: VadMode::Continuous,
         vad_silence_ms: 20,
         vad_chunk_ms: 10,
@@ -659,11 +727,21 @@ fn at05a_continuous_hold_key_transcribes_on_pause_before_release() -> Result<(),
 #[cfg(feature = "test-support")]
 #[test]
 fn at05b_continuous_long_speech_transcribes_before_release() -> Result<(), Box<dyn Error>> {
+    continuous_duration_case(false)
+}
+#[cfg(feature = "test-support")]
+#[test]
+fn at40_live_stream_outputs_during_long_speech() -> Result<(), Box<dyn Error>> {
+    continuous_duration_case(true)
+}
+#[cfg(feature = "test-support")]
+fn continuous_duration_case(live: bool) -> Result<(), Box<dyn Error>> {
     let (sender, receiver) = mpsc::channel();
     let control_sender = sender.clone();
     let (transcript_sender, transcript_receiver) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut output = TranscriptSignalOutput {
+        errors: Vec::new(),
         lines: Vec::new(),
         transcript_sender,
         transcript_marker: "Transcript 1: timed transcript",
@@ -673,11 +751,18 @@ fn at05b_continuous_long_speech_transcribes_before_release() -> Result<(), Box<d
             vec!["Mic".to_string()],
             vec![vec![0.2; 320], vec![0.2; 320], vec![0.2; 320]],
         )),
-        transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
-            "timed transcript".to_string()
-        ])),
+        transcriber_factory: if live {
+            Box::new(LiveOnlyFactory("timed transcript"))
+        } else {
+            Box::new(TestTranscriberFactory::new(vec!["timed transcript".into()]))
+        },
     };
     let config = DaemonConfig {
+        engine: if live {
+            sv::inference::InferenceEngine::Parakeet
+        } else {
+            sv::inference::InferenceEngine::Phonon2
+        },
         sample_rate: 16_000,
         vad: VadMode::Continuous,
         vad_silence_ms: 100,
@@ -721,6 +806,7 @@ fn at05b_continuous_long_speech_transcribes_before_release() -> Result<(), Box<d
 
 #[cfg(feature = "test-support")]
 struct TranscriptSignalOutput {
+    errors: Vec<String>,
     lines: Vec<String>,
     transcript_sender: mpsc::Sender<()>,
     transcript_marker: &'static str,
@@ -742,7 +828,9 @@ impl DaemonOutput for TranscriptSignalOutput {
         self.lines.push(message.to_string());
     }
 
-    fn stderr(&mut self, _message: &str) {}
+    fn stderr(&mut self, message: &str) {
+        self.errors.push(message.into());
+    }
 }
 
 #[test]
@@ -1479,5 +1567,201 @@ fn parakeet_real_asset_streams_through_daemon() -> Result<(), Box<dyn Error>> {
         lines.contains("country") && lines.contains("americans"),
         "{lines}"
     );
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn at40_live_timed_overlap_is_fed_and_deduped_on_release() -> Result<(), Box<dyn Error>> {
+    struct Factory(mpsc::Sender<()>);
+    struct Recognizer {
+        sequence: usize,
+        tail_ready: mpsc::Sender<()>,
+    }
+    struct Session {
+        sequence: usize,
+        audio: Vec<f32>,
+        tail_ready: mpsc::Sender<()>,
+    }
+    impl sv::daemon::TranscriberFactory for Factory {
+        fn load(
+            &self,
+            _: Option<&std::path::Path>,
+        ) -> Result<Box<dyn sv::daemon::Transcriber>, AppError> {
+            Ok(Box::new(Recognizer {
+                sequence: 0,
+                tail_ready: self.0.clone(),
+            }))
+        }
+    }
+    impl sv::daemon::Transcriber for Recognizer {
+        fn set_vocabulary(&mut self, _: &[String]) -> Result<Option<String>, AppError> {
+            Ok(None)
+        }
+        fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, AppError> {
+            Err(AppError::runtime("unexpected offline fallback"))
+        }
+        fn begin_stream(
+            &mut self,
+            _: Option<&str>,
+        ) -> Result<Option<Box<dyn sv::daemon::StreamingTranscriber + '_>>, AppError> {
+            self.sequence += 1;
+            Ok(Some(Box::new(Session {
+                sequence: self.sequence,
+                audio: Vec::new(),
+                tail_ready: self.tail_ready.clone(),
+            })))
+        }
+    }
+    impl sv::daemon::StreamingTranscriber for Session {
+        fn feed(&mut self, samples: &[f32]) -> Result<(), AppError> {
+            self.audio.extend_from_slice(samples);
+            if self.sequence == 2 && self.audio.len() >= 320 {
+                let _ = self.tail_ready.send(());
+            }
+            Ok(())
+        }
+        fn finish(&mut self) -> Result<String, AppError> {
+            let (expected, text) = if self.sequence == 1 {
+                ([vec![0.2; 320], vec![0.3; 320]].concat(), "hello world")
+            } else {
+                ([vec![0.3; 160], vec![0.4; 160]].concat(), "world again")
+            };
+            if self.audio != expected {
+                return Err(AppError::runtime("incorrect streamed audio at boundary"));
+            }
+            Ok(text.into())
+        }
+    }
+    let (tail_sender, tail_receiver) = mpsc::channel();
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::new(
+            vec!["Fixture".into()],
+            vec![vec![0.2; 320], vec![0.3; 320], vec![0.4; 160]],
+        )),
+        transcriber_factory: Box::new(Factory(tail_sender)),
+    };
+    let config = DaemonConfig {
+        engine: sv::inference::InferenceEngine::Parakeet,
+        vad: VadMode::Continuous,
+        segment_target_ms: 20,
+        segment_grace_ms: 20,
+        segment_overlap_ms: 10,
+        segment_min_ms: 10,
+        ..daemon_config()
+    };
+    let (sender, receiver) = mpsc::channel();
+    let controller = thread::spawn(move || -> Result<(), String> {
+        acknowledge(&sender, ControlEvent::StartRecording)?;
+        let fed = tail_receiver.recv_timeout(Duration::from_secs(3));
+        acknowledge(&sender, ControlEvent::StopRecording)?;
+        acknowledge(&sender, ControlEvent::Stop)?;
+        fed.map_err(|e| format!("second stream never received its overlap and new audio: {e}"))
+    });
+    let mut output = TestOutput::default();
+    sv::daemon::run_daemon_loop(
+        &config,
+        &deps,
+        &mut output,
+        receiver,
+        &AtomicBool::new(false),
+    )?;
+    controller.join().unwrap()?;
+    assert!(
+        output.stderr_lines().is_empty(),
+        "{:?}",
+        output.stderr_lines()
+    );
+    let transcripts: Vec<_> = output
+        .stdout_lines()
+        .iter()
+        .filter(|line| line.starts_with("Transcript "))
+        .cloned()
+        .collect();
+    assert_eq!(
+        transcripts,
+        ["Transcript 1: hello world", "Transcript 2: again"]
+    );
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn at40_real_parakeet_outputs_on_pause_and_duration_before_release() -> Result<(), Box<dyn Error>> {
+    let Some(model) = env::var_os("SV_PARAKEET_MODEL") else {
+        eprintln!("skip AT-40 native cases: set SV_PARAKEET_MODEL");
+        return Ok(());
+    };
+    let mut wav = hound::WavReader::open("tests/fixtures/jfk.wav")?;
+    let samples: Vec<f32> = wav
+        .samples::<i16>()
+        .map(|s| s.map(|v| v as f32 / 32768.0))
+        .collect::<Result<_, _>>()?;
+    for timed in [false, true] {
+        let config = DaemonConfig {
+            engine: sv::inference::InferenceEngine::Parakeet,
+            model_path: Some(PathBuf::from(&model)),
+            parakeet_backend: if env::var("SV_PARAKEET_BACKEND").as_deref() == Ok("vulkan") {
+                sv::parakeet::ParakeetBackend::Vulkan
+            } else {
+                sv::parakeet::ParakeetBackend::Cpu
+            },
+            vad: VadMode::Continuous,
+            vad_silence_ms: 100,
+            vad_chunk_ms: 20,
+            segment_target_ms: if timed { 1000 } else { 60000 },
+            segment_grace_ms: 1000,
+            ..daemon_config()
+        };
+        let mut deps = DaemonDeps::for_config(&config)?;
+        let mut chunks = vec![samples.clone()];
+        if !timed {
+            chunks.push(vec![0.0; 6400]);
+        }
+        deps.audio = Box::new(TestAudioBackend::new(vec!["Fixture".into()], chunks));
+        let (sender, receiver) = mpsc::channel();
+        let (transcript_sender, transcript_receiver) = mpsc::channel();
+        let controller = thread::spawn(move || -> Result<(), String> {
+            acknowledge_with_timeout(
+                &sender,
+                ControlEvent::StartRecording,
+                Duration::from_secs(300),
+            )?;
+            let seen = transcript_receiver.recv_timeout(Duration::from_secs(120));
+            acknowledge_with_timeout(
+                &sender,
+                ControlEvent::StopRecording,
+                Duration::from_secs(300),
+            )?;
+            acknowledge_with_timeout(&sender, ControlEvent::Stop, Duration::from_secs(300))?;
+            seen.map_err(|e| {
+                format!("native segment never emitted before release, timed={timed}: {e}")
+            })
+        });
+        let mut output = TranscriptSignalOutput {
+            errors: Vec::new(),
+            lines: Vec::new(),
+            transcript_sender,
+            transcript_marker: "Transcript 1:",
+        };
+        sv::daemon::run_daemon_loop(
+            &config,
+            &deps,
+            &mut output,
+            receiver,
+            &AtomicBool::new(false),
+        )?;
+        controller.join().unwrap()?;
+        assert!(
+            output.errors.is_empty(),
+            "timed={timed}: {:?}",
+            output.errors
+        );
+        let lines = output.stdout_lines().join(" ").to_lowercase();
+        assert!(
+            lines.contains("country") && lines.contains("americans"),
+            "timed={timed}: {lines}"
+        );
+    }
     Ok(())
 }

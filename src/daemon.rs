@@ -238,8 +238,16 @@ impl ActiveRecording {
             if audio::trim_trailing_silence(&self.buffer, config.sample_rate, vad).is_empty() {
                 return worker.cancel_stream();
             }
-            worker.feed_stream(self.buffer[previous..].to_vec())?;
-            return submit_segment(worker, config, &self.buffer, false, output);
+            if self.buffer.len() > previous {
+                worker.feed_stream(self.buffer[previous..].to_vec())?;
+            }
+            return submit_segment(
+                worker,
+                config,
+                &self.buffer,
+                self.has_leading_overlap,
+                output,
+            );
         }
         submit_final_recording(
             worker,
@@ -422,7 +430,7 @@ pub fn run_daemon_loop(
                     active.speech_detector.process(new_audio);
                 }
 
-                if config.vad == VadMode::Continuous && !live_streaming(config) {
+                if config.vad == VadMode::Continuous {
                     if rms < config.vad_threshold {
                         active.trailing_silence_samples += new_samples;
                     } else {
@@ -440,7 +448,13 @@ pub fn run_daemon_loop(
                         submit_segment(
                             &mut worker,
                             config,
-                            &active.buffer[..speech_end],
+                            // Live inference already received the entire buffer, including
+                            // pause silence. Offline retry must use the same audio.
+                            if live_streaming(config) {
+                                &active.buffer
+                            } else {
+                                &active.buffer[..speech_end]
+                            },
                             active.has_leading_overlap,
                             output,
                         )?;
@@ -457,6 +471,12 @@ pub fn run_daemon_loop(
                                 segment_config.vad_threshold,
                                 config.vad_chunk_ms,
                             );
+                        if live_streaming(config) {
+                            worker.begin_stream(Some(config.language.clone()))?;
+                            if !active.buffer.is_empty() {
+                                worker.feed_stream(active.buffer.clone())?;
+                            }
+                        }
                         active.trailing_silence_samples = 0;
                         active.speech_detector.reset();
                         active.started = std::time::Instant::now();

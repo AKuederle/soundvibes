@@ -180,6 +180,22 @@ systemctl --user daemon-reload
 systemctl --user enable --now sv.service
 ```
 
+## KDE system tray
+
+`sv daemon start` adds a system-tray icon in KDE Plasma. The microphone icon
+shows whether SoundVibes is listening: an active microphone during capture and
+a muted microphone while idle. Hover for the state, or click to see the ten most
+recent transcripts, newest first. Before the first transcript the menu shows
+"No transcripts yet". Click a transcript to copy its full text to the clipboard
+using `wl-copy`.
+
+History includes completed text from all output modes. It stays in memory for
+the current daemon session and resets on restart. The tray uses the desktop's
+microphone icon theme and D-Bus StatusNotifierItem support. It waits for Plasma
+when the user service starts early and reconnects after the tray watcher restarts.
+If the session bus is unavailable, SoundVibes logs a warning and continues
+without the icon.
+
 ## Development
 
 Run the complete local quality gate with:

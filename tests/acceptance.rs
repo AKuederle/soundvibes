@@ -1825,3 +1825,326 @@ fn at40_live_pause_after_output_does_not_cancel_the_hold() -> Result<(), Box<dyn
     assert!(output.errors.is_empty(), "{:?}", output.errors);
     Ok(())
 }
+
+// AT-41: The desktop tray follows capture state and retains recent output.
+#[cfg(feature = "test-support")]
+#[test]
+fn tray_tracks_capture_and_recent_transcripts() -> Result<(), Box<dyn Error>> {
+    use ksni::Tray;
+    let (sender, receiver) = mpsc::channel();
+    sender.send(ControlEvent::StartRecording)?;
+    sender.send(ControlEvent::StopRecording)?;
+    sender.send(ControlEvent::Stop)?;
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::new(
+            vec!["Mic".into()],
+            vec![vec![0.2; 160]],
+        )),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(vec!["hello_world".into()])),
+    };
+    let mut output = DesktopOutput::default();
+    sv::daemon::run_daemon_loop(
+        &daemon_config(),
+        &deps,
+        &mut output,
+        receiver,
+        &AtomicBool::new(false),
+    )?;
+    assert_eq!(output.states, [false, true, false]);
+    assert_eq!(
+        output.tray.recent_transcripts().collect::<Vec<_>>(),
+        ["hello_world"]
+    );
+    assert_eq!(output.tray.icon_name(), "microphone-sensitivity-muted");
+    output.tray.set_listening(true);
+    assert_eq!(output.tray.icon_name(), "audio-input-microphone");
+    Ok(())
+}
+
+// AT-41: History is bounded, newest first, and preserves literal transcript text.
+#[test]
+fn tray_history_keeps_the_latest_ten_transcripts() {
+    use ksni::Tray;
+    use sv::tray::TranscriptTray;
+
+    let mut tray = TranscriptTray::default();
+    assert!(
+        matches!(&tray.menu()[2], ksni::MenuItem::Standard(item) if item.label == "No transcripts yet")
+    );
+    tray.push_transcript("discarded");
+    for text in [
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten_&_十\nnext line",
+    ] {
+        tray.push_transcript(text);
+    }
+    tray.push_transcript(" \n ");
+    assert_eq!(
+        tray.recent_transcripts().collect::<Vec<_>>(),
+        [
+            "ten_&_十\nnext line",
+            "nine",
+            "eight",
+            "seven",
+            "six",
+            "five",
+            "four",
+            "three",
+            "two",
+            "one"
+        ]
+    );
+    assert!(
+        matches!(&tray.menu()[2], ksni::MenuItem::Standard(item) if item.label == "ten__&__十\nnext line")
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct DesktopOutput {
+    tray: sv::tray::TranscriptTray,
+    states: Vec<bool>,
+}
+#[cfg(feature = "test-support")]
+impl DaemonOutput for DesktopOutput {
+    fn stdout(&mut self, _: &str) {}
+    fn stderr(&mut self, _: &str) {}
+    fn listening_changed(&mut self, listening: bool) {
+        self.states.push(listening);
+        self.tray.set_listening(listening);
+    }
+    fn transcript(&mut self, text: &str) {
+        self.tray.push_transcript(text);
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn tray_stays_idle_after_capture_failure() {
+    let (sender, receiver) = mpsc::channel();
+    sender.send(ControlEvent::StartRecording).unwrap();
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::with_start_error(
+            vec!["Mic".into()],
+            sv::audio::AudioError {
+                kind: sv::audio::AudioErrorKind::DeviceUnavailable,
+                message: "capture unavailable".into(),
+            },
+        )),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(vec![])),
+    };
+    let mut output = DesktopOutput::default();
+    assert!(sv::daemon::run_daemon_loop(
+        &daemon_config(),
+        &deps,
+        &mut output,
+        receiver,
+        &AtomicBool::new(false)
+    )
+    .is_err());
+    assert_eq!(output.states, [false]);
+    assert_eq!(output.tray.recent_transcripts().count(), 0);
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn tray_returns_to_idle_after_silence_cancellation() -> Result<(), Box<dyn Error>> {
+    struct CancelOutput {
+        desktop: DesktopOutput,
+        shutdown: Arc<AtomicBool>,
+        cancelled: bool,
+    }
+    impl DaemonOutput for CancelOutput {
+        fn stdout(&mut self, text: &str) {
+            self.cancelled |= text == "No speech detected, cancelled.";
+        }
+        fn stderr(&mut self, _: &str) {}
+        fn listening_changed(&mut self, listening: bool) {
+            self.desktop.listening_changed(listening);
+            if self.desktop.states.len() == 3 {
+                self.shutdown.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut output = CancelOutput {
+        desktop: DesktopOutput::default(),
+        shutdown: shutdown.clone(),
+        cancelled: false,
+    };
+    let (sender, receiver) = mpsc::channel();
+    sender.send(ControlEvent::StartRecording)?;
+    let (done_sender, done_receiver) = mpsc::channel();
+    let watchdog = thread::spawn(move || {
+        if done_receiver.recv_timeout(Duration::from_secs(1)).is_err() {
+            let _ = sender.send(ControlEvent::Stop);
+        }
+    });
+    let config = DaemonConfig {
+        no_speech_timeout_ms: 1,
+        ..daemon_config()
+    };
+    let deps = DaemonDeps {
+        audio: Box::new(TestAudioBackend::new(
+            vec!["Mic".into()],
+            vec![vec![0.0; 160]],
+        )),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(vec![])),
+    };
+    sv::daemon::run_daemon_loop(&config, &deps, &mut output, receiver, &shutdown)?;
+    let _ = done_sender.send(());
+    watchdog.join().expect("tray test watchdog");
+    assert!(
+        output.cancelled,
+        "silent capture should cancel before the watchdog stops the daemon"
+    );
+    assert_eq!(output.desktop.states, [false, true, false]);
+    Ok(())
+}
+
+// AT-41: Clicking a history row copies its complete, unescaped text.
+#[cfg(feature = "test-support")]
+#[test]
+fn tray_click_copies_the_selected_transcript() {
+    use ksni::Tray;
+    use sv::output::OutputMode;
+
+    let runner = Arc::new(Mutex::new(TestRunner::default()));
+    runner.lock().unwrap().push_status(0);
+    let clipboard_runner = runner.clone();
+    let mut tray = sv::tray::TranscriptTray::with_clipboard(move |text| {
+        sv::output::output_text_with_runner(
+            text,
+            &OutputConfig {
+                mode: OutputMode::Clipboard,
+                ..OutputConfig::default()
+            },
+            &mut *clipboard_runner.lock().unwrap(),
+        )
+        .unwrap();
+    });
+    tray.push_transcript("Older transcript");
+    tray.push_transcript("Full_Unicode 十\nsecond line");
+    let items = tray.menu();
+    let ksni::MenuItem::Standard(item) = &items[2] else {
+        panic!("missing transcript row")
+    };
+    assert!(item.enabled);
+    (item.activate)(&mut tray);
+    let commands = &runner.lock().unwrap().commands;
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].program, "wl-copy");
+    assert_eq!(commands[0].stdin, "Full_Unicode 十\nsecond line".as_bytes());
+}
+
+// AT-41: A history copy waits for the complete dictation paste/restore transaction.
+#[cfg(feature = "test-support")]
+#[test]
+fn tray_copy_waits_for_dictation_clipboard_transaction() {
+    use sv::output::{output_text_with_runner, CommandRunner, OutputError, OutputMode};
+
+    struct PausingRunner {
+        inner: TestRunner,
+        paused: mpsc::Sender<()>,
+        resume: mpsc::Receiver<()>,
+        pause_at: Duration,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+    impl CommandRunner for PausingRunner {
+        fn output(
+            &mut self,
+            program: &str,
+            args: &[String],
+        ) -> std::io::Result<std::process::Output> {
+            self.inner.output(program, args)
+        }
+        fn status_with_stdin(
+            &mut self,
+            program: &str,
+            args: &[String],
+            stdin: &[u8],
+        ) -> std::io::Result<std::process::ExitStatus> {
+            self.events.lock().unwrap().push(program.to_string());
+            self.inner.status_with_stdin(program, args, stdin)
+        }
+        fn copy_temporary_text(&mut self, text: &str) -> Result<(), OutputError> {
+            self.inner.copy_temporary_text(text)
+        }
+        fn sleep(&mut self, duration: Duration) {
+            if duration == self.pause_at {
+                self.paused.send(()).unwrap();
+                self.resume.recv_timeout(Duration::from_secs(2)).unwrap();
+            }
+        }
+    }
+    for pause_ms in [100, 250] {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (paused_tx, paused_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let mut inner = TestRunner::default();
+        inner.push_output(0, b"text/plain\n", b"");
+        inner.push_output(0, b"old clipboard", b"");
+        inner.push_status(0);
+        inner.push_status(0);
+        let mut runner = PausingRunner {
+            inner,
+            paused: paused_tx,
+            resume: resume_rx,
+            pause_at: Duration::from_millis(pause_ms),
+            events: events.clone(),
+        };
+        let paste = thread::spawn(move || {
+            output_text_with_runner("dictation", &OutputConfig::default(), &mut runner).unwrap();
+        });
+        paused_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (copied_tx, copied_rx) = mpsc::channel();
+        let copy_events = events.clone();
+        let copy = thread::spawn(move || {
+            let mut tray = sv::tray::TranscriptTray::with_clipboard(move |text| {
+                let mut runner = TestRunner::default();
+                runner.push_status(0);
+                output_text_with_runner(
+                    text,
+                    &OutputConfig {
+                        mode: OutputMode::Clipboard,
+                        ..OutputConfig::default()
+                    },
+                    &mut runner,
+                )
+                .unwrap();
+                copy_events.lock().unwrap().push("history copy".into());
+                copied_tx.send(()).unwrap();
+            });
+            tray.push_transcript("history");
+            use ksni::Tray;
+            let items = tray.menu();
+            let ksni::MenuItem::Standard(item) = &items[2] else {
+                panic!("missing history")
+            };
+            attempt_tx.send(()).unwrap();
+            (item.activate)(&mut tray);
+        });
+        attempt_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let copied_early = copied_rx.recv_timeout(Duration::from_millis(30)).is_ok();
+        resume_tx.send(()).unwrap();
+        paste.join().unwrap();
+        copy.join().unwrap();
+        assert!(
+            !copied_early,
+            "history copy interrupted the paste transaction at {pause_ms} ms"
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["dotool", "wl-copy", "history copy"]
+        );
+    }
+}

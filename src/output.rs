@@ -2,10 +2,14 @@ use std::env;
 use std::fmt;
 use std::io::Write as _;
 use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use clap::ValueEnum;
 use serde::Deserialize;
+
+// Tray copies and dictation share the clipboard, including paste restoration.
+static CLIPBOARD_TRANSACTION: Mutex<()> = Mutex::new(());
 
 const MAX_CLIPBOARD_BYTES: usize = 100 * 1024 * 1024;
 const KDE_SECRET_MIME: &str = "x-kde-passwordManagerHint";
@@ -157,6 +161,15 @@ pub fn output_text_with_runner(
         return Ok(());
     }
 
+    let _clipboard_guard = if matches!(config.mode, OutputMode::Paste | OutputMode::Clipboard) {
+        Some(
+            CLIPBOARD_TRANSACTION
+                .lock()
+                .map_err(|_| OutputError::new("clipboard transaction lock poisoned"))?,
+        )
+    } else {
+        None
+    };
     match config.mode {
         OutputMode::Stdout => Ok(()),
         OutputMode::Paste => paste_text(text, config, runner),

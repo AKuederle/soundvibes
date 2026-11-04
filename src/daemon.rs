@@ -58,6 +58,8 @@ pub struct DaemonConfig {
 pub trait DaemonOutput {
     fn stdout(&mut self, message: &str);
     fn stderr(&mut self, message: &str);
+    fn listening_changed(&mut self, _listening: bool) {}
+    fn transcript(&mut self, _text: &str) {}
 }
 
 pub struct StdoutOutput;
@@ -282,7 +284,8 @@ pub fn run_daemon(
         })?;
     }
 
-    run_daemon_loop(config, deps, output, control_events, &shutdown)
+    let mut desktop_output = crate::tray::DesktopOutput::new(output);
+    run_daemon_loop(config, deps, &mut desktop_output, control_events, &shutdown)
 }
 
 pub fn run_daemon_loop(
@@ -325,6 +328,7 @@ pub fn run_daemon_loop(
     );
 
     let mut recording: Option<ActiveRecording> = None;
+    output.listening_changed(false);
     let mut last_emitted_transcript = String::new();
     // Grace period after recording starts to ignore audio feedback pickup (500ms)
     let speech_detection_grace_ms: u64 = if config.audio_feedback { 500 } else { 0 };
@@ -335,6 +339,7 @@ pub fn run_daemon_loop(
 
         if shutdown.load(Ordering::Relaxed) {
             if let Some(active) = recording.take() {
+                output.listening_changed(false);
                 active.finish(&mut worker, config, &vad, output)?;
             }
             wait_for_pending_results(&mut worker, config, output, &mut last_emitted_transcript);
@@ -363,6 +368,7 @@ pub fn run_daemon_loop(
                                     worker.begin_stream(Some(config.language.clone()))?;
                                 }
                                 recording = Some(active);
+                                output.listening_changed(true);
                             }
                             Err(err) if respond_to.is_some() => {
                                 acknowledge_error(respond_to.as_ref(), &err);
@@ -375,6 +381,7 @@ pub fn run_daemon_loop(
                 }
                 ControlEvent::StopRecording => {
                     if let Some(active) = recording.take() {
+                        output.listening_changed(false);
                         if let Err(err) = active.finish(&mut worker, config, &vad, output) {
                             if respond_to.is_some() {
                                 acknowledge_error(respond_to.as_ref(), &err);
@@ -490,6 +497,7 @@ pub fn run_daemon_loop(
                 && (active.started.elapsed().as_millis() as u64) >= config.no_speech_timeout_ms
             {
                 recording = None;
+                output.listening_changed(false);
                 worker.cancel_stream()?;
                 output.stdout("No speech detected, cancelled.");
                 if config.audio_feedback {
@@ -665,6 +673,7 @@ fn emit_transcript(
     text: &str,
     info: audio::SegmentInfo,
 ) {
+    output.transcript(text);
     if config.debug_transcripts {
         output.stderr(&format!("Debug transcript {}: {text:?}", info.index));
     }

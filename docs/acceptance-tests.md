@@ -198,3 +198,14 @@ streaming, and begin/feed/finish failures with complete-audio offline fallback.
   no-speech timeout, pauses after finalized output, resumes speech without key
   release, and requires a second segment.
 - Run `cargo test --test acceptance --features test-support at40`.
+
+### AT-41: KDE system tray listening state and recent transcripts
+
+- Starting the daemon registers a KDE StatusNotifierItem. Clicking its icon opens the transcript menu.
+- The icon and tooltip show Listening only while microphone capture is active. Release, cancellation, and shutdown end that state; failed capture must not enable it.
+- The popup shows the last ten nonempty completed transcripts, newest first, regardless of the output destination. Preserve the exact text, including Unicode and underscores.
+- Clicking a transcript copies its full, unescaped text to the clipboard, with no paste or clipboard restoration. History copies wait for any active dictation paste/restore transaction.
+- Show "No transcripts yet" before the first transcript. History stays in memory and resets when the daemon restarts.
+- A missing desktop session must not prevent dictation. The tray reconnects if Plasma's watcher restarts.
+- Automated: `tray_tracks_capture_and_recent_transcripts`, `tray_history_keeps_the_latest_ten_transcripts`, `tray_click_copies_the_selected_transcript`, `tray_copy_waits_for_dictation_clipboard_transaction`, `tray_stays_idle_after_capture_failure`, `tray_returns_to_idle_after_silence_cancellation` in `tests/acceptance.rs`.
+- Desktop check: start `sv daemon start` in KDE Plasma, click the icon before and after dictating, hold/release the recording hotkey, then stop the daemon. Confirm both icons, tooltip, popup ordering, and removal on exit. This needs a running Plasma session.

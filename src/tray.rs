@@ -2,11 +2,14 @@
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::{MenuItem, StandardItem};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 
 use crate::daemon::{Activity, DaemonOutput};
 use crate::output::{self, OutputConfig, OutputMode};
+use crate::popup::{self, PopupContent};
 
 const HISTORY_LIMIT: usize = 10;
 
@@ -14,7 +17,8 @@ pub struct TranscriptTray {
     activity: Activity,
     transcripts: VecDeque<String>,
     recording_text: String,
-    copy_to_clipboard: Box<dyn Fn(&str) + Send>,
+    copy_to_clipboard: Arc<dyn Fn(&str) + Send + Sync>,
+    popup_open: Arc<AtomicBool>,
 }
 
 impl Default for TranscriptTray {
@@ -47,12 +51,13 @@ impl Default for TranscriptTray {
 
 impl TranscriptTray {
     /// Supply a clipboard dispatcher. It must return promptly to keep the menu responsive.
-    pub fn with_clipboard(copy: impl Fn(&str) + Send + 'static) -> Self {
+    pub fn with_clipboard(copy: impl Fn(&str) + Send + Sync + 'static) -> Self {
         Self {
             activity: Activity::Idle,
             transcripts: VecDeque::new(),
             recording_text: String::new(),
-            copy_to_clipboard: Box::new(copy),
+            copy_to_clipboard: Arc::new(copy),
+            popup_open: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -100,9 +105,38 @@ impl TranscriptTray {
     }
 }
 
-impl ksni::Tray for TranscriptTray {
-    const MENU_ON_ACTIVATE: bool = true;
+/// A click uses the same immutable recording snapshot displayed by the popup.
+pub struct HistorySnapshot {
+    pub content: PopupContent,
+    copy_to_clipboard: Arc<dyn Fn(&str) + Send + Sync>,
+}
 
+impl HistorySnapshot {
+    pub fn copy_selected(&self, index: usize) -> bool {
+        if let Some(text) = self.content.transcripts.get(index) {
+            (self.copy_to_clipboard)(text);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl TranscriptTray {
+    pub fn history_popup(&self, x: i32, y: i32) -> HistorySnapshot {
+        HistorySnapshot {
+            content: PopupContent {
+                title: self.label().to_string(),
+                transcripts: self.recent_transcripts().map(str::to_string).collect(),
+                x,
+                y,
+            },
+            copy_to_clipboard: Arc::clone(&self.copy_to_clipboard),
+        }
+    }
+}
+
+impl ksni::Tray for TranscriptTray {
     fn id(&self) -> String {
         "soundvibes".into()
     }
@@ -132,31 +166,40 @@ impl ksni::Tray for TranscriptTray {
         }
     }
 
-    fn menu(&self) -> Vec<MenuItem<Self>> {
-        let label = |text: &str| {
-            StandardItem {
-                // D-Bus menus interpret underscores as mnemonic markers.
-                label: text.replace('_', "__"),
-                enabled: false,
-                ..Default::default()
-            }
-            .into()
-        };
-        let mut items = vec![label(self.label()), MenuItem::Separator];
-        if self.transcripts.is_empty() {
-            items.push(label("No transcripts yet"));
-        } else {
-            items.extend(self.recent_transcripts().map(|text| {
-                let text = text.to_string();
-                StandardItem {
-                    label: text.replace('_', "__"),
-                    activate: Box::new(move |tray: &mut Self| (tray.copy_to_clipboard)(&text)),
-                    ..Default::default()
-                }
-                .into()
-            }));
+    fn activate(&mut self, x: i32, y: i32) {
+        if self.popup_open.swap(true, Ordering::AcqRel) {
+            return;
         }
-        items
+        let history = self.history_popup(x, y);
+        let open = Arc::clone(&self.popup_open);
+        let token = ksni::current_xdg_activation_token();
+        if let Err(err) = thread::Builder::new()
+            .name("history-popup".into())
+            .spawn(move || {
+                match popup::show(&history.content, token) {
+                    Ok(Some(index)) => {
+                        history.copy_selected(index);
+                    }
+                    Ok(None) => {}
+                    Err(err) => eprintln!("warn: {err}"),
+                }
+                open.store(false, Ordering::Release);
+            })
+        {
+            self.popup_open.store(false, Ordering::Release);
+            eprintln!("warn: failed to start history popup: {err}");
+        }
+    }
+
+    fn menu(&self) -> Vec<MenuItem<Self>> {
+        vec![StandardItem {
+            label: "Open recording history".into(),
+            activate: Box::new(|tray: &mut Self| {
+                tray.activate(0, 0);
+            }),
+            ..Default::default()
+        }
+        .into()]
     }
 }
 

@@ -150,6 +150,14 @@ enum CliCommand {
     },
     #[command(name = "transcript-path")]
     TranscriptPath,
+    #[command(hide = true)]
+    TrayPopup,
+    #[cfg(feature = "test-support")]
+    #[command(hide = true)]
+    TrayPopupInspect {
+        #[arg(long)]
+        select: Option<i32>,
+    },
 }
 
 #[derive(Subcommand, Debug, Copy, Clone, PartialEq, Eq)]
@@ -167,6 +175,9 @@ enum CliMode {
     StatusDaemon,
     StopDaemon,
     ShowTranscriptPath,
+    ShowTrayPopup,
+    #[cfg(feature = "test-support")]
+    InspectTrayPopup,
     ListDevices,
     TestAudio,
 }
@@ -183,6 +194,9 @@ fn resolve_cli_mode(cli: &Cli) -> CliMode {
             command: DaemonCommand::Stop,
         }) => CliMode::StopDaemon,
         Some(CliCommand::TranscriptPath) => CliMode::ShowTranscriptPath,
+        Some(CliCommand::TrayPopup) => CliMode::ShowTrayPopup,
+        #[cfg(feature = "test-support")]
+        Some(CliCommand::TrayPopupInspect { .. }) => CliMode::InspectTrayPopup,
         Some(CliCommand::Daemon {
             command: DaemonCommand::TestAudio,
         }) => CliMode::TestAudio,
@@ -417,6 +431,25 @@ fn main() {
         }
         CliMode::ShowTranscriptPath => {
             println!("{}", daemon::transcript_file_path().display());
+            return;
+        }
+        CliMode::ShowTrayPopup => {
+            if let Err(err) = sv::popup::run(false, -1) {
+                eprintln!("error: {err}");
+                process::exit(err.exit_code());
+            }
+            return;
+        }
+        #[cfg(feature = "test-support")]
+        CliMode::InspectTrayPopup => {
+            let select = match cli.command {
+                Some(CliCommand::TrayPopupInspect { select }) => select.unwrap_or(-1),
+                _ => -1,
+            };
+            if let Err(err) = sv::popup::run(true, select) {
+                eprintln!("error: {err}");
+                process::exit(err.exit_code());
+            }
             return;
         }
         CliMode::RunDaemon | CliMode::ListDevices | CliMode::TestAudio => {}

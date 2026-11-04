@@ -201,11 +201,21 @@ streaming, and begin/feed/finish failures with complete-audio offline fallback.
 
 ### AT-41: KDE system tray listening state and recent transcripts
 
-- Starting the daemon registers a KDE StatusNotifierItem. Clicking its icon opens the transcript menu.
+- Starting the daemon registers a KDE StatusNotifierItem. Clicking its icon opens the wrapped history popup. The context menu has an Open recording history action.
 - The icon is a dedicated recording dot: red for Listening while capture is active, amber for Processing after release until all decoding and output finish, and gray for Idle. Concurrent decoding during capture stays Listening. The tooltip names the state. Failed capture and silent cancellation stay or return Idle.
 - The popup shows the last ten nonempty completed recordings, newest first, regardless of the output destination. Combine all segments from each start/stop interval with spaces, including final results arriving after release. Keep recordings separate and omit empty recordings; shutdown also finishes the active recording. Preserve segment text, including Unicode and underscores, trimming only segment boundary whitespace.
 - Clicking a transcript copies its full, unescaped text to the clipboard, with no paste or clipboard restoration. History copies wait for any active dictation paste/restore transaction.
-- Show "No transcripts yet" before the first transcript. History stays in memory and resets when the daemon restarts.
+- Show an empty-history explanation before the first recording. History stays in memory and resets when the daemon restarts.
 - A missing desktop session must not prevent dictation. The tray reconnects if Plasma's watcher restarts.
 - Automated: `tray_uses_distinct_recording_dots_for_each_activity`, `tray_history_groups_segments_until_recording_finishes`, `tray_tracks_capture_and_recent_transcripts`, `tray_history_keeps_the_latest_ten_transcripts`, `tray_click_copies_the_selected_transcript`, `tray_copy_waits_for_dictation_clipboard_transaction`, `tray_stays_idle_after_capture_failure`, `tray_returns_to_idle_after_silence_cancellation` in `tests/acceptance.rs`.
 - Desktop check: start `sv daemon start` in KDE Plasma, click the icon before and after dictating, hold/release the recording hotkey, then stop the daemon. Confirm all three dots and tooltips, one history entry per recording, full-recording copy, and removal on exit. This needs a running Plasma session.
+
+### AT-42: Wrapped native history popup
+
+- Left-click the tray to open one native Qt popup, about 420 logical pixels wide and at most 560 pixels high, constrained to the current screen.
+- Each complete recording is one keyboard-accessible clickable block. Wrap paragraphs and long unbroken words within the popup; use plain text so dictated markup remains literal.
+- Long histories scroll vertically; there is no horizontal scrolling or text clipping.
+- Selecting a recording copies its original full text from the snapshot shown when the popup opened, even if new recordings arrive meanwhile. Existing clipboard transaction coordination applies.
+- Escape, the window close action, or switching to another app dismisses the popup. Repeated clicks do not spawn duplicate popups. Empty history explains that recordings will appear here.
+- Automated: `history_popup_empty_state_has_no_selection` verifies compact empty history and dismissal. `history_popup_wraps_and_selects_full_recordings` measures the actual Qt layout offscreen and activates a recording. `tray_click_copies_the_selected_transcript` verifies immutable snapshot selection and full-text clipboard output.
+- Desktop check: open history from the tray, verify word wrap and vertical scrolling, click a recording to copy, use Tab/Enter and Escape, and switch to another window to dismiss. Placement follows the window manager on Wayland.

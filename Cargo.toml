@@ -35,3 +35,7 @@ ksni = { version = "0.3", features = ["blocking"] }
 [patch.crates-io]
 transcribe-cpp = { git = "https://github.com/anomalyco/transcribe.cpp", rev = "7045d1c0fe7cee37747b2792977421d435e75fca" }
 transcribe-cpp-sys = { git = "https://github.com/anomalyco/transcribe.cpp", rev = "7045d1c0fe7cee37747b2792977421d435e75fca" }
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"

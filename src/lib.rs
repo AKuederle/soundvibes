@@ -6,6 +6,7 @@ pub mod hotkey;
 pub mod inference;
 pub mod model;
 pub mod output;
+pub mod popup;
 pub mod segmentation;
 mod transcription_worker;
 pub mod tray;

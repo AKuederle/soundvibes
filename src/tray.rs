@@ -5,14 +5,15 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::daemon::DaemonOutput;
+use crate::daemon::{Activity, DaemonOutput};
 use crate::output::{self, OutputConfig, OutputMode};
 
 const HISTORY_LIMIT: usize = 10;
 
 pub struct TranscriptTray {
-    listening: bool,
+    activity: Activity,
     transcripts: VecDeque<String>,
+    recording_text: String,
     copy_to_clipboard: Box<dyn Fn(&str) + Send>,
 }
 
@@ -48,14 +49,33 @@ impl TranscriptTray {
     /// Supply a clipboard dispatcher. It must return promptly to keep the menu responsive.
     pub fn with_clipboard(copy: impl Fn(&str) + Send + 'static) -> Self {
         Self {
-            listening: false,
+            activity: Activity::Idle,
             transcripts: VecDeque::new(),
+            recording_text: String::new(),
             copy_to_clipboard: Box::new(copy),
         }
     }
 
-    pub fn set_listening(&mut self, listening: bool) {
-        self.listening = listening;
+    pub fn set_activity(&mut self, activity: Activity) {
+        self.activity = activity;
+    }
+
+    /// Accumulate decoded segments while the recording is in progress or finishing.
+    pub fn append_segment(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        if !self.recording_text.is_empty() {
+            self.recording_text.push(' ');
+        }
+        self.recording_text.push_str(text);
+    }
+
+    /// Publish only after every pending segment from this recording has arrived.
+    pub fn finish_recording(&mut self) {
+        let text = std::mem::take(&mut self.recording_text);
+        self.push_transcript(&text);
     }
 
     pub fn push_transcript(&mut self, text: &str) {
@@ -72,10 +92,10 @@ impl TranscriptTray {
     }
 
     fn label(&self) -> &'static str {
-        if self.listening {
-            "SoundVibes: Listening"
-        } else {
-            "SoundVibes: Not listening"
+        match self.activity {
+            Activity::Idle => "SoundVibes: Idle",
+            Activity::Listening => "SoundVibes: Listening",
+            Activity::Processing => "SoundVibes: Processing",
         }
     }
 }
@@ -91,18 +111,21 @@ impl ksni::Tray for TranscriptTray {
         self.label().into()
     }
 
-    fn icon_name(&self) -> String {
-        if self.listening {
-            "audio-input-microphone"
-        } else {
-            "microphone-sensitivity-muted"
-        }
-        .into()
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        let rgb = match self.activity {
+            Activity::Idle => [145, 145, 145],
+            Activity::Listening => [235, 45, 50],
+            Activity::Processing => [245, 170, 35],
+        };
+        [16, 22, 32, 48]
+            .into_iter()
+            .map(|size| recording_dot(size, rgb))
+            .collect()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            icon_name: self.icon_name(),
+            icon_pixmap: self.icon_pixmap(),
             title: self.label().into(),
             description: "Click to see recent transcripts; click a transcript to copy it".into(),
             ..Default::default()
@@ -166,17 +189,24 @@ impl DaemonOutput for DesktopOutput<'_> {
         self.output.stderr(message);
     }
 
-    fn listening_changed(&mut self, listening: bool) {
-        self.output.listening_changed(listening);
+    fn activity_changed(&mut self, activity: Activity) {
+        self.output.activity_changed(activity);
         if let Some(tray) = &self.tray {
-            tray.update(|tray| tray.set_listening(listening));
+            tray.update(|tray| tray.set_activity(activity));
         }
     }
 
     fn transcript(&mut self, text: &str) {
         self.output.transcript(text);
         if let Some(tray) = &self.tray {
-            tray.update(|tray| tray.push_transcript(text));
+            tray.update(|tray| tray.append_segment(text));
+        }
+    }
+
+    fn recording_finished(&mut self) {
+        self.output.recording_finished();
+        if let Some(tray) = &self.tray {
+            tray.update(|tray| tray.finish_recording());
         }
     }
 }
@@ -186,5 +216,25 @@ impl Drop for DesktopOutput<'_> {
         if let Some(tray) = &self.tray {
             tray.shutdown();
         }
+    }
+}
+
+/// Network-order ARGB pixels, with a one-pixel antialiased circle edge.
+fn recording_dot(size: i32, rgb: [u8; 3]) -> ksni::Icon {
+    let mut data = Vec::with_capacity((size * size * 4) as usize);
+    let center = size as f32 / 2.0;
+    let radius = size as f32 * 0.35;
+    for y in 0..size {
+        for x in 0..size {
+            let distance =
+                ((x as f32 + 0.5 - center).powi(2) + (y as f32 + 0.5 - center).powi(2)).sqrt();
+            let alpha = ((radius + 0.5 - distance).clamp(0.0, 1.0) * 255.0).round() as u8;
+            data.extend_from_slice(&[alpha, rgb[0], rgb[1], rgb[2]]);
+        }
+    }
+    ksni::Icon {
+        width: size,
+        height: size,
+        data,
     }
 }

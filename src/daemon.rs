@@ -55,11 +55,21 @@ pub struct DaemonConfig {
     pub hotkey: HotkeyConfig,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    #[default]
+    Idle,
+    Listening,
+    Processing,
+}
+
 pub trait DaemonOutput {
     fn stdout(&mut self, message: &str);
     fn stderr(&mut self, message: &str);
-    fn listening_changed(&mut self, _listening: bool) {}
+    fn activity_changed(&mut self, _activity: Activity) {}
     fn transcript(&mut self, _text: &str) {}
+    /// All decoded segments from the recording have been delivered.
+    fn recording_finished(&mut self) {}
 }
 
 pub struct StdoutOutput;
@@ -328,7 +338,7 @@ pub fn run_daemon_loop(
     );
 
     let mut recording: Option<ActiveRecording> = None;
-    output.listening_changed(false);
+    output.activity_changed(Activity::Idle);
     let mut last_emitted_transcript = String::new();
     // Grace period after recording starts to ignore audio feedback pickup (500ms)
     let speech_detection_grace_ms: u64 = if config.audio_feedback { 500 } else { 0 };
@@ -338,11 +348,16 @@ pub fn run_daemon_loop(
         drain_worker_results(&mut worker, config, output, &mut last_emitted_transcript);
 
         if shutdown.load(Ordering::Relaxed) {
+            let was_recording = recording.is_some();
             if let Some(active) = recording.take() {
-                output.listening_changed(false);
+                output.activity_changed(Activity::Processing);
                 active.finish(&mut worker, config, &vad, output)?;
             }
             wait_for_pending_results(&mut worker, config, output, &mut last_emitted_transcript);
+            if was_recording {
+                output.recording_finished();
+                output.activity_changed(Activity::Idle);
+            }
             worker.shutdown()?;
             output.stdout("Daemon shutting down.");
             break;
@@ -368,7 +383,7 @@ pub fn run_daemon_loop(
                                     worker.begin_stream(Some(config.language.clone()))?;
                                 }
                                 recording = Some(active);
-                                output.listening_changed(true);
+                                output.activity_changed(Activity::Listening);
                             }
                             Err(err) if respond_to.is_some() => {
                                 acknowledge_error(respond_to.as_ref(), &err);
@@ -381,20 +396,23 @@ pub fn run_daemon_loop(
                 }
                 ControlEvent::StopRecording => {
                     if let Some(active) = recording.take() {
-                        output.listening_changed(false);
-                        if let Err(err) = active.finish(&mut worker, config, &vad, output) {
-                            if respond_to.is_some() {
-                                acknowledge_error(respond_to.as_ref(), &err);
-                                continue;
-                            }
-                            return Err(err);
-                        }
+                        output.activity_changed(Activity::Processing);
+                        let finish_result = active.finish(&mut worker, config, &vad, output);
                         wait_for_pending_results(
                             &mut worker,
                             config,
                             output,
                             &mut last_emitted_transcript,
                         );
+                        output.recording_finished();
+                        output.activity_changed(Activity::Idle);
+                        if let Err(err) = finish_result {
+                            if respond_to.is_some() {
+                                acknowledge_error(respond_to.as_ref(), &err);
+                                continue;
+                            }
+                            return Err(err);
+                        }
                         output.stdout("Ready for next utterance.");
                         if config.audio_feedback {
                             feedback::play_stop_sound();
@@ -497,8 +515,10 @@ pub fn run_daemon_loop(
                 && (active.started.elapsed().as_millis() as u64) >= config.no_speech_timeout_ms
             {
                 recording = None;
-                output.listening_changed(false);
+                output.activity_changed(Activity::Idle);
                 worker.cancel_stream()?;
+                wait_for_pending_results(&mut worker, config, output, &mut last_emitted_transcript);
+                output.recording_finished();
                 output.stdout("No speech detected, cancelled.");
                 if config.audio_feedback {
                     feedback::play_stop_sound();

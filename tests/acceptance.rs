@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use sv::daemon::test_support::{
     daemon_config, TestAudioBackend, TestOutput, TestTranscriberFactory,
 };
-use sv::daemon::ControlEvent;
+use sv::daemon::{Activity, ControlEvent};
 #[cfg(feature = "test-support")]
 use sv::daemon::{DaemonConfig, DaemonDeps, DaemonOutput};
 #[cfg(feature = "test-support")]
@@ -1850,14 +1850,20 @@ fn tray_tracks_capture_and_recent_transcripts() -> Result<(), Box<dyn Error>> {
         receiver,
         &AtomicBool::new(false),
     )?;
-    assert_eq!(output.states, [false, true, false]);
+    assert_eq!(
+        output.states,
+        [
+            Activity::Idle,
+            Activity::Listening,
+            Activity::Processing,
+            Activity::Idle
+        ]
+    );
     assert_eq!(
         output.tray.recent_transcripts().collect::<Vec<_>>(),
         ["hello_world"]
     );
-    assert_eq!(output.tray.icon_name(), "microphone-sensitivity-muted");
-    output.tray.set_listening(true);
-    assert_eq!(output.tray.icon_name(), "audio-input-microphone");
+    assert_eq!(output.tray.title(), "SoundVibes: Idle");
     Ok(())
 }
 
@@ -1868,6 +1874,8 @@ fn tray_history_keeps_the_latest_ten_transcripts() {
     use sv::tray::TranscriptTray;
 
     let mut tray = TranscriptTray::default();
+    tray.append_segment(" \n ");
+    tray.finish_recording();
     assert!(
         matches!(&tray.menu()[2], ksni::MenuItem::Standard(item) if item.label == "No transcripts yet")
     );
@@ -1911,18 +1919,21 @@ fn tray_history_keeps_the_latest_ten_transcripts() {
 #[derive(Default)]
 struct DesktopOutput {
     tray: sv::tray::TranscriptTray,
-    states: Vec<bool>,
+    states: Vec<Activity>,
 }
 #[cfg(feature = "test-support")]
 impl DaemonOutput for DesktopOutput {
     fn stdout(&mut self, _: &str) {}
     fn stderr(&mut self, _: &str) {}
-    fn listening_changed(&mut self, listening: bool) {
-        self.states.push(listening);
-        self.tray.set_listening(listening);
+    fn activity_changed(&mut self, activity: Activity) {
+        self.states.push(activity);
+        self.tray.set_activity(activity);
     }
     fn transcript(&mut self, text: &str) {
-        self.tray.push_transcript(text);
+        self.tray.append_segment(text);
+    }
+    fn recording_finished(&mut self) {
+        self.tray.finish_recording();
     }
 }
 
@@ -1950,7 +1961,7 @@ fn tray_stays_idle_after_capture_failure() {
         &AtomicBool::new(false)
     )
     .is_err());
-    assert_eq!(output.states, [false]);
+    assert_eq!(output.states, [Activity::Idle]);
     assert_eq!(output.tray.recent_transcripts().count(), 0);
 }
 
@@ -1967,8 +1978,8 @@ fn tray_returns_to_idle_after_silence_cancellation() -> Result<(), Box<dyn Error
             self.cancelled |= text == "No speech detected, cancelled.";
         }
         fn stderr(&mut self, _: &str) {}
-        fn listening_changed(&mut self, listening: bool) {
-            self.desktop.listening_changed(listening);
+        fn activity_changed(&mut self, activity: Activity) {
+            self.desktop.activity_changed(activity);
             if self.desktop.states.len() == 3 {
                 self.shutdown.store(true, Ordering::Relaxed);
             }
@@ -2006,7 +2017,10 @@ fn tray_returns_to_idle_after_silence_cancellation() -> Result<(), Box<dyn Error
         output.cancelled,
         "silent capture should cancel before the watchdog stops the daemon"
     );
-    assert_eq!(output.desktop.states, [false, true, false]);
+    assert_eq!(
+        output.desktop.states,
+        [Activity::Idle, Activity::Listening, Activity::Idle]
+    );
     Ok(())
 }
 
@@ -2147,4 +2161,157 @@ fn tray_copy_waits_for_dictation_clipboard_transaction() {
             ["dotool", "wl-copy", "history copy"]
         );
     }
+}
+
+// AT-41: Continuous segments become one clickable history entry per recording.
+#[cfg(feature = "test-support")]
+#[test]
+fn tray_history_groups_segments_until_recording_finishes() -> Result<(), Box<dyn Error>> {
+    use ksni::Tray;
+    struct RecordingOutput {
+        desktop: DesktopOutput,
+        segments: mpsc::Sender<()>,
+        history_during_segments: Vec<usize>,
+        activity_during_segments: Vec<Activity>,
+    }
+    impl DaemonOutput for RecordingOutput {
+        fn stdout(&mut self, _: &str) {}
+        fn stderr(&mut self, _: &str) {}
+        fn activity_changed(&mut self, activity: Activity) {
+            self.desktop.activity_changed(activity);
+        }
+        fn transcript(&mut self, text: &str) {
+            self.desktop.transcript(text);
+            self.activity_during_segments
+                .push(*self.desktop.states.last().unwrap());
+            self.history_during_segments
+                .push(self.desktop.tray.recent_transcripts().count());
+            let _ = self.segments.send(());
+        }
+        fn recording_finished(&mut self) {
+            self.desktop.recording_finished();
+        }
+    }
+    let (copy_tx, copy_rx) = mpsc::channel();
+    let (segment_tx, segment_rx) = mpsc::channel();
+    let mut output = RecordingOutput {
+        desktop: DesktopOutput {
+            tray: sv::tray::TranscriptTray::with_clipboard(move |text| {
+                copy_tx.send(text.to_string()).unwrap();
+            }),
+            ..DesktopOutput::default()
+        },
+        segments: segment_tx,
+        history_during_segments: vec![],
+        activity_during_segments: vec![],
+    };
+    let audio = TestAudioBackend::new(vec!["Mic".into()], vec![vec![0.2; 320], vec![0.0; 400]]);
+    let control_audio = audio.clone();
+    let (sender, receiver) = mpsc::channel();
+    sender.send(ControlEvent::StartRecording)?;
+    let control = thread::spawn(move || {
+        let first_segment = segment_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        if first_segment {
+            control_audio.push_samples(vec![0.2; 320]);
+        }
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        sender
+            .send(ControlEvent::Request {
+                event: Box::new(ControlEvent::StopRecording),
+                respond_to: reply_tx,
+            })
+            .unwrap();
+        let reply = reply_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(reply.ok);
+        control_audio.push_samples(vec![0.2; 160]);
+        sender.send(ControlEvent::StartRecording).unwrap();
+        sender.send(ControlEvent::Stop).unwrap();
+        first_segment
+    });
+    let config = DaemonConfig {
+        vad: VadMode::Continuous,
+        vad_silence_ms: 20,
+        vad_chunk_ms: 20,
+        segment_min_ms: 20,
+        ..daemon_config()
+    };
+    let deps = DaemonDeps {
+        audio: Box::new(audio),
+        transcriber_factory: Box::new(TestTranscriberFactory::new(vec![
+            "First part.".into(),
+            "Last_words 十.".into(),
+            "Separate recording.".into(),
+        ])),
+    };
+    sv::daemon::run_daemon_loop(
+        &config,
+        &deps,
+        &mut output,
+        receiver,
+        &AtomicBool::new(false),
+    )?;
+    assert!(
+        control.join().unwrap(),
+        "expected a segment before releasing the recording"
+    );
+    assert_eq!(output.history_during_segments, [0, 0, 1]);
+    assert_eq!(
+        output.activity_during_segments,
+        [
+            Activity::Listening,
+            Activity::Processing,
+            Activity::Processing
+        ]
+    );
+    assert_eq!(output.desktop.states.last(), Some(&Activity::Idle));
+    assert_eq!(
+        output.desktop.tray.recent_transcripts().collect::<Vec<_>>(),
+        ["Separate recording.", "First part. Last_words 十."]
+    );
+    let menu = output.desktop.tray.menu();
+    let ksni::MenuItem::Standard(item) = &menu[3] else {
+        panic!("missing complete recording")
+    };
+    (item.activate)(&mut output.desktop.tray);
+    assert_eq!(
+        copy_rx.recv_timeout(Duration::from_secs(1))?,
+        "First part. Last_words 十."
+    );
+    Ok(())
+}
+
+// AT-41: Dedicated recording dots distinguish idle, listening and processing.
+#[test]
+fn tray_uses_distinct_recording_dots_for_each_activity() {
+    use ksni::Tray;
+    let mut tray = sv::tray::TranscriptTray::with_clipboard(|_| {});
+    let mut centers = Vec::new();
+    for (activity, title) in [
+        (Activity::Idle, "SoundVibes: Idle"),
+        (Activity::Listening, "SoundVibes: Listening"),
+        (Activity::Processing, "SoundVibes: Processing"),
+    ] {
+        tray.set_activity(activity);
+        assert_eq!(tray.title(), title);
+        assert!(
+            tray.icon_name().is_empty(),
+            "use the recording dot, not a theme audio icon"
+        );
+        let icons = tray.icon_pixmap();
+        let icon = &icons[0];
+        assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
+        assert_eq!(icon.data[0], 0, "circle corners must be transparent");
+        let center = ((icon.height / 2 * icon.width + icon.width / 2) * 4) as usize;
+        centers.push(icon.data[center..center + 4].to_vec());
+        assert!(!tray.tool_tip().icon_pixmap.is_empty());
+    }
+    assert_eq!(centers[0][0], 255);
+    assert_eq!(centers[0][1], centers[0][2]);
+    assert_eq!(centers[0][2], centers[0][3]);
+    assert!(centers[1][1] > centers[1][2] * 2, "listening should be red");
+    assert!(
+        centers[2][1] > centers[2][2] && centers[2][2] > centers[2][3],
+        "processing should be amber"
+    );
+    assert_ne!(centers[1], centers[2]);
 }

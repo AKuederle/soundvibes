@@ -30,12 +30,8 @@ signal-hook = "0.3.17"
 regex = "1"
 serde_json = "1.0.117"
 wl-clipboard-rs = "0.9"
-ksni = { version = "0.3", features = ["blocking"] }
+zbus = { version = "5.19", default-features = false, features = ["tokio", "blocking-api"] }
 
 [patch.crates-io]
 transcribe-cpp = { git = "https://github.com/anomalyco/transcribe.cpp", rev = "7045d1c0fe7cee37747b2792977421d435e75fca" }
 transcribe-cpp-sys = { git = "https://github.com/anomalyco/transcribe.cpp", rev = "7045d1c0fe7cee37747b2792977421d435e75fca" }
-
-[build-dependencies]
-cc = "1"
-pkg-config = "0.3"

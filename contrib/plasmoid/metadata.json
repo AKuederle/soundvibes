@@ -1,0 +1,17 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Id": "org.soundvibes.dictation",
+        "Name": "SoundVibes",
+        "Description": "Recording status and complete dictation history",
+        "Icon": "media-record",
+        "Category": "Utilities",
+        "License": "GPL-3.0-or-later",
+        "Version": "0.1.0",
+        "EnabledByDefault": true,
+        "Authors": [{"Name": "SoundVibes contributors"}]
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-NotificationAreaCategory": "ApplicationStatus",
+    "X-Plasma-DBusActivationService": "org.soundvibes.Daemon"
+}

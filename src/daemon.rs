@@ -55,7 +55,8 @@ pub struct DaemonConfig {
     pub hotkey: HotkeyConfig,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Activity {
     #[default]
     Idle,
@@ -294,7 +295,7 @@ pub fn run_daemon(
         })?;
     }
 
-    let mut desktop_output = crate::tray::DesktopOutput::new(output);
+    let mut desktop_output = crate::desktop::DesktopOutput::new(output);
     run_daemon_loop(config, deps, &mut desktop_output, control_events, &shutdown)
 }
 

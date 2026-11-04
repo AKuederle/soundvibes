@@ -185,18 +185,21 @@ systemctl --user enable --now sv.service
 `sv daemon start` adds a recording-dot icon in KDE Plasma: red while listening,
 amber while finishing transcription after release, and gray while idle. During
 continuous recording, the dot stays red even when segments are decoded in the
-background. Hover for the state, or click to see the ten most recent recordings,
-newest first. Before the first transcript the menu shows
-"No transcripts yet". Click a transcript to copy its full text to the clipboard
+background. Hover for the state, or click to open a 420-pixel-wide history popup.
+The ten most recent recordings appear newest first, with wrapped text and vertical
+scrolling. Very long words wrap too. Before the first recording, the popup
+explains that recordings will appear here. Click a recording to copy its full text to the clipboard
 using `wl-copy`.
 
 Each history entry contains a whole recording, combining the segments decoded
 between recording start and stop. The entry appears after the final segment has
 finished decoding, and clicking it copies the whole recording. Empty recordings
 are omitted. History includes completed text from all output modes. It stays in
-memory for the current daemon session and resets on restart. The tray uses its own colored
-dots and D-Bus StatusNotifierItem support. It waits for Plasma when the user
-service starts early and reconnects after the tray watcher restarts.
+memory for the current daemon session and resets on restart. The tray uses its
+own colored dots and D-Bus StatusNotifierItem support. The history popup uses native Qt6
+Widgets in a child process of the same `sv` executable; building requires Qt6
+Widgets development files and desktop use requires the Qt6 Wayland platform
+plugin on Wayland. The tray waits for Plasma when the user service starts early and reconnects after the tray watcher restarts.
 If the session bus is unavailable, SoundVibes logs a warning and continues
 without the icon.
 

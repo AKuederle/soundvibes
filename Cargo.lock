@@ -1423,6 +1423,7 @@ name = "sv"
 version = "0.1.0"
 dependencies = [
  "alsa-sys",
+ "cc",
  "chrono",
  "clap",
  "cpal",
@@ -1431,6 +1432,7 @@ dependencies = [
  "ksni",
  "libc",
  "phonon2",
+ "pkg-config",
  "regex",
  "ringbuf",
  "serde",

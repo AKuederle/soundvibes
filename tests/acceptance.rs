@@ -1870,15 +1870,12 @@ fn tray_tracks_capture_and_recent_transcripts() -> Result<(), Box<dyn Error>> {
 // AT-41: History is bounded, newest first, and preserves literal transcript text.
 #[test]
 fn tray_history_keeps_the_latest_ten_transcripts() {
-    use ksni::Tray;
     use sv::tray::TranscriptTray;
 
     let mut tray = TranscriptTray::default();
     tray.append_segment(" \n ");
     tray.finish_recording();
-    assert!(
-        matches!(&tray.menu()[2], ksni::MenuItem::Standard(item) if item.label == "No transcripts yet")
-    );
+    assert!(tray.history_popup(0, 0).content.transcripts.is_empty());
     tray.push_transcript("discarded");
     for text in [
         "one",
@@ -1910,8 +1907,9 @@ fn tray_history_keeps_the_latest_ten_transcripts() {
             "one"
         ]
     );
-    assert!(
-        matches!(&tray.menu()[2], ksni::MenuItem::Standard(item) if item.label == "ten__&__十\nnext line")
+    assert_eq!(
+        tray.history_popup(0, 0).content.transcripts[0],
+        "ten_&_十\nnext line"
     );
 }
 
@@ -2028,7 +2026,6 @@ fn tray_returns_to_idle_after_silence_cancellation() -> Result<(), Box<dyn Error
 #[cfg(feature = "test-support")]
 #[test]
 fn tray_click_copies_the_selected_transcript() {
-    use ksni::Tray;
     use sv::output::OutputMode;
 
     let runner = Arc::new(Mutex::new(TestRunner::default()));
@@ -2047,12 +2044,10 @@ fn tray_click_copies_the_selected_transcript() {
     });
     tray.push_transcript("Older transcript");
     tray.push_transcript("Full_Unicode 十\nsecond line");
-    let items = tray.menu();
-    let ksni::MenuItem::Standard(item) = &items[2] else {
-        panic!("missing transcript row")
-    };
-    assert!(item.enabled);
-    (item.activate)(&mut tray);
+    let snapshot = tray.history_popup(0, 0);
+    tray.push_transcript("New recording after the popup opened");
+    assert!(snapshot.copy_selected(0));
+    assert!(!snapshot.copy_selected(100));
     let commands = &runner.lock().unwrap().commands;
     assert_eq!(commands.len(), 1);
     assert_eq!(commands[0].program, "wl-copy");
@@ -2139,13 +2134,9 @@ fn tray_copy_waits_for_dictation_clipboard_transaction() {
                 copied_tx.send(()).unwrap();
             });
             tray.push_transcript("history");
-            use ksni::Tray;
-            let items = tray.menu();
-            let ksni::MenuItem::Standard(item) = &items[2] else {
-                panic!("missing history")
-            };
+            let snapshot = tray.history_popup(0, 0);
             attempt_tx.send(()).unwrap();
-            (item.activate)(&mut tray);
+            assert!(snapshot.copy_selected(0));
         });
         attempt_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let copied_early = copied_rx.recv_timeout(Duration::from_millis(30)).is_ok();
@@ -2167,7 +2158,6 @@ fn tray_copy_waits_for_dictation_clipboard_transaction() {
 #[cfg(feature = "test-support")]
 #[test]
 fn tray_history_groups_segments_until_recording_finishes() -> Result<(), Box<dyn Error>> {
-    use ksni::Tray;
     struct RecordingOutput {
         desktop: DesktopOutput,
         segments: mpsc::Sender<()>,
@@ -2268,11 +2258,7 @@ fn tray_history_groups_segments_until_recording_finishes() -> Result<(), Box<dyn
         output.desktop.tray.recent_transcripts().collect::<Vec<_>>(),
         ["Separate recording.", "First part. Last_words 十."]
     );
-    let menu = output.desktop.tray.menu();
-    let ksni::MenuItem::Standard(item) = &menu[3] else {
-        panic!("missing complete recording")
-    };
-    (item.activate)(&mut output.desktop.tray);
+    assert!(output.desktop.tray.history_popup(0, 0).copy_selected(1));
     assert_eq!(
         copy_rx.recv_timeout(Duration::from_secs(1))?,
         "First part. Last_words 十."
@@ -2314,4 +2300,90 @@ fn tray_uses_distinct_recording_dots_for_each_activity() {
         "processing should be amber"
     );
     assert_ne!(centers[1], centers[2]);
+}
+
+// AT-42: The real Qt popup wraps full recordings at a fixed, scrollable width.
+#[cfg(feature = "test-support")]
+#[test]
+fn history_popup_wraps_and_selects_full_recordings() -> Result<(), Box<dyn Error>> {
+    use std::io::Write;
+    let text = format!(
+        "A complete recording with <literal markup> and Unicode 十. {}\n{}",
+        "Words that should wrap naturally. ".repeat(12),
+        "long_unbroken_token_".repeat(30)
+    );
+    let transcripts = vec![text.clone(); 10];
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sv"))
+        .arg("tray-popup-inspect")
+        .args(["--select", "0"])
+        .env("QT_QPA_PLATFORM", "offscreen")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child.stdin.take().unwrap().write_all(
+        serde_json::to_string(
+            &serde_json::json!({"title":"SoundVibes: Idle", "transcripts":transcripts,"x":0,"y":0}),
+        )?
+        .as_bytes(),
+    )?;
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["width"], 420);
+    assert!(report["height"].as_i64().unwrap() <= 560);
+    assert_eq!(report["horizontal_scroll_max"], 0);
+    assert!(report["vertical_scroll_max"].as_i64().unwrap() > 0);
+    assert_eq!(report["rows"].as_array().unwrap().len(), 10);
+    assert_eq!(report["rows"][0]["text"], text);
+    assert!(
+        report["rows"][0]["height"].as_i64().unwrap()
+            > report["rows"][0]["line_height"].as_i64().unwrap() * 3
+    );
+    assert!(
+        report["rows"][0]["height"].as_i64().unwrap()
+            >= report["rows"][0]["required_height"].as_i64().unwrap()
+    );
+    assert_eq!(report["rows"][0]["label_visible"], true);
+    assert!(
+        report["rows"][0]["label_height"].as_i64().unwrap()
+            >= report["rows"][0]["label_required_height"].as_i64().unwrap()
+    );
+    assert_eq!(report["selected"], 0);
+    Ok(())
+}
+
+// AT-42: Empty history is compact and dismissal does not select a recording.
+#[cfg(feature = "test-support")]
+#[test]
+fn history_popup_empty_state_has_no_selection() -> Result<(), Box<dyn Error>> {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sv"))
+        .arg("tray-popup-inspect")
+        .env("QT_QPA_PLATFORM", "offscreen")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"title":"SoundVibes: Idle","transcripts":[],"x":0,"y":0}"#)?;
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["selected"], -1);
+    assert_eq!(report["rows"].as_array().unwrap().len(), 0);
+    assert!(report["height"].as_i64().unwrap() < 250);
+    assert_eq!(report["vertical_scroll_max"], 0);
+    Ok(())
 }

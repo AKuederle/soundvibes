@@ -199,23 +199,18 @@ streaming, and begin/feed/finish failures with complete-audio offline fallback.
   release, and requires a second segment.
 - Run `cargo test --test acceptance --features test-support at40`.
 
-### AT-41: KDE system tray listening state and recent transcripts
+### AT-41: Native Plasma activity indicator and complete-recording history
 
-- Starting the daemon registers a KDE StatusNotifierItem. Clicking its icon opens the wrapped history popup. The context menu has an Open recording history action.
-- The icon is a dedicated recording dot: red for Listening while capture is active, amber for Processing after release until all decoding and output finish, and gray for Idle. Concurrent decoding during capture stays Listening. The tooltip names the state. Failed capture and silent cancellation stay or return Idle.
-- The popup shows the last ten nonempty completed recordings, newest first, regardless of the output destination. Combine all segments from each start/stop interval with spaces, including final results arriving after release. Keep recordings separate and omit empty recordings; shutdown also finishes the active recording. Preserve segment text, including Unicode and underscores, trimming only segment boundary whitespace.
-- Clicking a transcript copies its full, unescaped text to the clipboard, with no paste or clipboard restoration. History copies wait for any active dictation paste/restore transaction.
-- Show an empty-history explanation before the first recording. History stays in memory and resets when the daemon restarts.
-- A missing desktop session must not prevent dictation. The tray reconnects if Plasma's watcher restarts.
-- Automated: `tray_uses_distinct_recording_dots_for_each_activity`, `tray_history_groups_segments_until_recording_finishes`, `tray_tracks_capture_and_recent_transcripts`, `tray_history_keeps_the_latest_ten_transcripts`, `tray_click_copies_the_selected_transcript`, `tray_copy_waits_for_dictation_clipboard_transaction`, `tray_stays_idle_after_capture_failure`, `tray_returns_to_idle_after_silence_cancellation` in `tests/acceptance.rs`.
-- Desktop check: start `sv daemon start` in KDE Plasma, click the icon before and after dictating, hold/release the recording hotkey, then stop the daemon. Confirm all three dots and tooltips, one history entry per recording, full-recording copy, and removal on exit. This needs a running Plasma session.
+- The native SoundVibes plasmoid appears in Plasma's system tray when the daemon runs. Its icon is red for Listening during capture, amber for Processing after release until decoding/output finish, and gray for Idle.
+- Decoding during continuous capture stays Listening. Failed capture and silent cancellation stay or return Idle.
+- History keeps the ten latest nonempty complete recordings, newest first. Combine segments with spaces after trimming segment boundary whitespace, including final results after release. Keep recordings separate and finish active history on shutdown.
+- Clicking a recording copies its full literal text by stable ID, even when another recording has since become the newest entry. Missing/expired IDs return an error. Copies wait for dictation's complete paste/restore transaction.
+- Automated in `tests/acceptance.rs`: `tray_tracks_capture_and_recent_transcripts`, `tray_history_keeps_the_latest_ten_transcripts`, `tray_history_groups_segments_until_recording_finishes`, `tray_stays_idle_after_capture_failure`, `tray_returns_to_idle_after_silence_cancellation`, `tray_copy_waits_for_dictation_clipboard_transaction`, `plasmoid_dbus_publishes_recordings_and_copies_by_id`.
 
-### AT-42: Wrapped native history popup
+### AT-42: Shell-owned wrapped Plasma popup
 
-- Left-click the tray to open one native Qt popup, about 420 logical pixels wide and at most 560 pixels high, constrained to the current screen.
-- Each complete recording is one keyboard-accessible clickable block. Wrap paragraphs and long unbroken words within the popup; use plain text so dictated markup remains literal.
-- Long histories scroll vertically; there is no horizontal scrolling or text clipping.
-- Selecting a recording copies its original full text from the snapshot shown when the popup opened, even if new recordings arrive meanwhile. Existing clipboard transaction coordination applies.
-- Escape, the window close action, or switching to another app dismisses the popup. Repeated clicks do not spawn duplicate popups. Empty history explains that recordings will appear here.
-- Automated: `history_popup_empty_state_has_no_selection` verifies compact empty history and dismissal. `history_popup_wraps_and_selects_full_recordings` measures the actual Qt layout offscreen and activates a recording. `tray_click_copies_the_selected_transcript` verifies immutable snapshot selection and full-text clipboard output.
-- Desktop check: open history from the tray, verify word wrap and vertical scrolling, click a recording to copy, use Tab/Enter and Escape, and switch to another window to dismiss. Placement follows the window manager on Wayland.
+- The widget is a QML `PlasmoidItem` with compact and full representations. Plasma owns the tray-anchored popup, theme, resizing, focus and dismissal; no external Qt window or tray item is launched.
+- Each recording is one native clickable list delegate with plain-text wrapping, including long words and Unicode. The list scrolls vertically and shows an explanatory empty/offline state.
+- The QML client receives initial state and subsequent D-Bus property changes, copies by recording ID, displays copy errors, and clears visible history when the daemon disappears. It reconnects when the service returns.
+- `plasmoid_qml_wraps_history_and_tracks_dbus_lifecycle` in `tests/acceptance.rs` runs the real Plasma QML delegate and D-Bus client tests against an isolated bus. It skips when the Qt test runner or Plasma workspace QML modules are absent. D-Bus-only tests skip if `dbus-daemon` is unavailable.
+- Desktop check: install the package, verify its native system-tray registration, click the dot, inspect wrapped complete recordings, copy one, test keyboard navigation and shell dismissal, then restart the daemon.

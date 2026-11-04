@@ -1830,7 +1830,6 @@ fn at40_live_pause_after_output_does_not_cancel_the_hold() -> Result<(), Box<dyn
 #[cfg(feature = "test-support")]
 #[test]
 fn tray_tracks_capture_and_recent_transcripts() -> Result<(), Box<dyn Error>> {
-    use ksni::Tray;
     let (sender, receiver) = mpsc::channel();
     sender.send(ControlEvent::StartRecording)?;
     sender.send(ControlEvent::StopRecording)?;
@@ -1860,22 +1859,22 @@ fn tray_tracks_capture_and_recent_transcripts() -> Result<(), Box<dyn Error>> {
         ]
     );
     assert_eq!(
-        output.tray.recent_transcripts().collect::<Vec<_>>(),
+        output.history.recent_transcripts().collect::<Vec<_>>(),
         ["hello_world"]
     );
-    assert_eq!(output.tray.title(), "SoundVibes: Idle");
+    assert_eq!(output.history.activity, Activity::Idle);
     Ok(())
 }
 
 // AT-41: History is bounded, newest first, and preserves literal transcript text.
 #[test]
 fn tray_history_keeps_the_latest_ten_transcripts() {
-    use sv::tray::TranscriptTray;
+    use sv::desktop::RecordingHistory;
 
-    let mut tray = TranscriptTray::default();
+    let mut tray = RecordingHistory::default();
     tray.append_segment(" \n ");
     tray.finish_recording();
-    assert!(tray.history_popup(0, 0).content.transcripts.is_empty());
+    assert!(tray.recordings.is_empty());
     tray.push_transcript("discarded");
     for text in [
         "one",
@@ -1907,16 +1906,13 @@ fn tray_history_keeps_the_latest_ten_transcripts() {
             "one"
         ]
     );
-    assert_eq!(
-        tray.history_popup(0, 0).content.transcripts[0],
-        "ten_&_十\nnext line"
-    );
+    assert_eq!(tray.recordings[0].text, "ten_&_十\nnext line");
 }
 
 #[cfg(feature = "test-support")]
 #[derive(Default)]
 struct DesktopOutput {
-    tray: sv::tray::TranscriptTray,
+    history: sv::desktop::RecordingHistory,
     states: Vec<Activity>,
 }
 #[cfg(feature = "test-support")]
@@ -1925,13 +1921,13 @@ impl DaemonOutput for DesktopOutput {
     fn stderr(&mut self, _: &str) {}
     fn activity_changed(&mut self, activity: Activity) {
         self.states.push(activity);
-        self.tray.set_activity(activity);
+        self.history.set_activity(activity);
     }
     fn transcript(&mut self, text: &str) {
-        self.tray.append_segment(text);
+        self.history.append_segment(text);
     }
     fn recording_finished(&mut self) {
-        self.tray.finish_recording();
+        self.history.finish_recording();
     }
 }
 
@@ -1960,7 +1956,7 @@ fn tray_stays_idle_after_capture_failure() {
     )
     .is_err());
     assert_eq!(output.states, [Activity::Idle]);
-    assert_eq!(output.tray.recent_transcripts().count(), 0);
+    assert_eq!(output.history.recent_transcripts().count(), 0);
 }
 
 #[cfg(feature = "test-support")]
@@ -2020,38 +2016,6 @@ fn tray_returns_to_idle_after_silence_cancellation() -> Result<(), Box<dyn Error
         [Activity::Idle, Activity::Listening, Activity::Idle]
     );
     Ok(())
-}
-
-// AT-41: Clicking a history row copies its complete, unescaped text.
-#[cfg(feature = "test-support")]
-#[test]
-fn tray_click_copies_the_selected_transcript() {
-    use sv::output::OutputMode;
-
-    let runner = Arc::new(Mutex::new(TestRunner::default()));
-    runner.lock().unwrap().push_status(0);
-    let clipboard_runner = runner.clone();
-    let mut tray = sv::tray::TranscriptTray::with_clipboard(move |text| {
-        sv::output::output_text_with_runner(
-            text,
-            &OutputConfig {
-                mode: OutputMode::Clipboard,
-                ..OutputConfig::default()
-            },
-            &mut *clipboard_runner.lock().unwrap(),
-        )
-        .unwrap();
-    });
-    tray.push_transcript("Older transcript");
-    tray.push_transcript("Full_Unicode 十\nsecond line");
-    let snapshot = tray.history_popup(0, 0);
-    tray.push_transcript("New recording after the popup opened");
-    assert!(snapshot.copy_selected(0));
-    assert!(!snapshot.copy_selected(100));
-    let commands = &runner.lock().unwrap().commands;
-    assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].program, "wl-copy");
-    assert_eq!(commands[0].stdin, "Full_Unicode 十\nsecond line".as_bytes());
 }
 
 // AT-41: A history copy waits for the complete dictation paste/restore transaction.
@@ -2118,25 +2082,20 @@ fn tray_copy_waits_for_dictation_clipboard_transaction() {
         let (copied_tx, copied_rx) = mpsc::channel();
         let copy_events = events.clone();
         let copy = thread::spawn(move || {
-            let mut tray = sv::tray::TranscriptTray::with_clipboard(move |text| {
-                let mut runner = TestRunner::default();
-                runner.push_status(0);
-                output_text_with_runner(
-                    text,
-                    &OutputConfig {
-                        mode: OutputMode::Clipboard,
-                        ..OutputConfig::default()
-                    },
-                    &mut runner,
-                )
-                .unwrap();
-                copy_events.lock().unwrap().push("history copy".into());
-                copied_tx.send(()).unwrap();
-            });
-            tray.push_transcript("history");
-            let snapshot = tray.history_popup(0, 0);
+            let mut runner = TestRunner::default();
+            runner.push_status(0);
             attempt_tx.send(()).unwrap();
-            assert!(snapshot.copy_selected(0));
+            output_text_with_runner(
+                "history",
+                &OutputConfig {
+                    mode: OutputMode::Clipboard,
+                    ..OutputConfig::default()
+                },
+                &mut runner,
+            )
+            .unwrap();
+            copy_events.lock().unwrap().push("history copy".into());
+            copied_tx.send(()).unwrap();
         });
         attempt_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let copied_early = copied_rx.recv_timeout(Duration::from_millis(30)).is_ok();
@@ -2175,22 +2134,16 @@ fn tray_history_groups_segments_until_recording_finishes() -> Result<(), Box<dyn
             self.activity_during_segments
                 .push(*self.desktop.states.last().unwrap());
             self.history_during_segments
-                .push(self.desktop.tray.recent_transcripts().count());
+                .push(self.desktop.history.recent_transcripts().count());
             let _ = self.segments.send(());
         }
         fn recording_finished(&mut self) {
             self.desktop.recording_finished();
         }
     }
-    let (copy_tx, copy_rx) = mpsc::channel();
     let (segment_tx, segment_rx) = mpsc::channel();
     let mut output = RecordingOutput {
-        desktop: DesktopOutput {
-            tray: sv::tray::TranscriptTray::with_clipboard(move |text| {
-                copy_tx.send(text.to_string()).unwrap();
-            }),
-            ..DesktopOutput::default()
-        },
+        desktop: DesktopOutput::default(),
         segments: segment_tx,
         history_during_segments: vec![],
         activity_during_segments: vec![],
@@ -2255,135 +2208,188 @@ fn tray_history_groups_segments_until_recording_finishes() -> Result<(), Box<dyn
     );
     assert_eq!(output.desktop.states.last(), Some(&Activity::Idle));
     assert_eq!(
-        output.desktop.tray.recent_transcripts().collect::<Vec<_>>(),
+        output
+            .desktop
+            .history
+            .recent_transcripts()
+            .collect::<Vec<_>>(),
         ["Separate recording.", "First part. Last_words 十."]
     );
-    assert!(output.desktop.tray.history_popup(0, 0).copy_selected(1));
-    assert_eq!(
-        copy_rx.recv_timeout(Duration::from_secs(1))?,
-        "First part. Last_words 十."
-    );
     Ok(())
 }
 
-// AT-41: Dedicated recording dots distinguish idle, listening and processing.
+// AT-42: The native widget reads daemon state and copies stable recording IDs.
 #[test]
-fn tray_uses_distinct_recording_dots_for_each_activity() {
-    use ksni::Tray;
-    let mut tray = sv::tray::TranscriptTray::with_clipboard(|_| {});
-    let mut centers = Vec::new();
-    for (activity, title) in [
-        (Activity::Idle, "SoundVibes: Idle"),
-        (Activity::Listening, "SoundVibes: Listening"),
-        (Activity::Processing, "SoundVibes: Processing"),
-    ] {
-        tray.set_activity(activity);
-        assert_eq!(tray.title(), title);
-        assert!(
-            tray.icon_name().is_empty(),
-            "use the recording dot, not a theme audio icon"
+fn plasmoid_dbus_publishes_recordings_and_copies_by_id() -> Result<(), Box<dyn Error>> {
+    use serde_json::Value;
+    use sv::desktop::{DesktopBridge, BUS_NAME, INTERFACE, OBJECT_PATH};
+    let Some(bus) = isolated_desktop_bus()? else {
+        return Ok(());
+    };
+    let address = &bus.address;
+    let (copied_tx, copied_rx) = mpsc::channel();
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let bridge = DesktopBridge::connect_at(Some(address.trim()), move |text| {
+            copied_tx
+                .send(text.to_string())
+                .map_err(|err| err.to_string())
+        })?;
+        bridge.update(|history| {
+            history.set_activity(Activity::Listening);
+            history.append_segment("First part.");
+            history.append_segment("Last_words 十.");
+        })?;
+        let connection = zbus::blocking::connection::Builder::address(address.trim())?.build()?;
+        let proxy = zbus::blocking::Proxy::new(&connection, BUS_NAME, OBJECT_PATH, INTERFACE)?;
+        let snapshot = || -> Result<Value, Box<dyn Error>> {
+            let properties = zbus::blocking::Proxy::new(
+                &connection,
+                BUS_NAME,
+                OBJECT_PATH,
+                "org.freedesktop.DBus.Properties",
+            )?;
+            let value: zbus::zvariant::OwnedValue =
+                properties.call("Get", &(INTERFACE, "Snapshot"))?;
+            Ok(serde_json::from_str(&String::try_from(value)?)?)
+        };
+        let pending = snapshot()?;
+        assert_eq!(pending["activity"], "listening");
+        assert_eq!(pending["recordings"], serde_json::json!([]));
+        bridge.update(|history| {
+            history.finish_recording();
+            history.set_activity(Activity::Processing);
+        })?;
+        let first = snapshot()?;
+        let id = first["recordings"][0]["id"].as_str().unwrap().to_string();
+        assert_eq!(first["activity"], "processing");
+        assert_eq!(first["recordings"][0]["text"], "First part. Last_words 十.");
+        bridge.update(|history| {
+            history.append_segment("New recording.");
+            history.finish_recording();
+            history.set_activity(Activity::Idle);
+        })?;
+        let _: () = proxy.call("CopyRecording", &(id.as_str(),))?;
+        assert_eq!(
+            copied_rx.recv_timeout(Duration::from_secs(1))?,
+            "First part. Last_words 十."
         );
-        let icons = tray.icon_pixmap();
-        let icon = &icons[0];
-        assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
-        assert_eq!(icon.data[0], 0, "circle corners must be transparent");
-        let center = ((icon.height / 2 * icon.width + icon.width / 2) * 4) as usize;
-        centers.push(icon.data[center..center + 4].to_vec());
-        assert!(!tray.tool_tip().icon_pixmap.is_empty());
+        let bad: zbus::Result<()> = proxy.call("CopyRecording", &("not-a-recording",));
+        assert!(bad.is_err());
+        Ok(())
+    })();
+    result
+}
+
+struct IsolatedDesktopBus {
+    child: std::process::Child,
+    address: String,
+}
+
+impl Drop for IsolatedDesktopBus {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
-    assert_eq!(centers[0][0], 255);
-    assert_eq!(centers[0][1], centers[0][2]);
-    assert_eq!(centers[0][2], centers[0][3]);
-    assert!(centers[1][1] > centers[1][2] * 2, "listening should be red");
-    assert!(
-        centers[2][1] > centers[2][2] && centers[2][2] > centers[2][3],
-        "processing should be amber"
-    );
-    assert_ne!(centers[1], centers[2]);
 }
 
-// AT-42: The real Qt popup wraps full recordings at a fixed, scrollable width.
-#[cfg(feature = "test-support")]
+fn isolated_desktop_bus() -> Result<Option<IsolatedDesktopBus>, Box<dyn Error>> {
+    let mut child = match Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("Skipping desktop integration test: dbus-daemon not installed");
+            return Ok(None);
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let mut address = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut address)?;
+    Ok(Some(IsolatedDesktopBus {
+        child,
+        address: address.trim().to_string(),
+    }))
+}
+
+fn qml_test_runner() -> Option<PathBuf> {
+    let module_available = ["/usr/lib/qt6/qml", "/usr/lib/x86_64-linux-gnu/qt6/qml"]
+        .iter()
+        .any(|base| {
+            PathBuf::from(base)
+                .join("org/kde/plasma/workspace/dbus/qmldir")
+                .exists()
+        });
+    if !module_available {
+        eprintln!("Skipping Plasma QML tests: KDE workspace QML modules not installed");
+        return None;
+    }
+    ["/usr/lib/qt6/bin/qmltestrunner", "/usr/bin/qmltestrunner6"]
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.exists())
+}
+
+// AT-42: Exercise actual Plasma delegates and the QML D-Bus client.
 #[test]
-fn history_popup_wraps_and_selects_full_recordings() -> Result<(), Box<dyn Error>> {
-    use std::io::Write;
-    let text = format!(
-        "A complete recording with <literal markup> and Unicode 十. {}\n{}",
-        "Words that should wrap naturally. ".repeat(12),
-        "long_unbroken_token_".repeat(30)
-    );
-    let transcripts = vec![text.clone(); 10];
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sv"))
-        .arg("tray-popup-inspect")
-        .args(["--select", "0"])
+fn plasmoid_qml_wraps_history_and_tracks_dbus_lifecycle() -> Result<(), Box<dyn Error>> {
+    use sv::desktop::DesktopBridge;
+    let Some(runner) = qml_test_runner() else {
+        return Ok(());
+    };
+    let layout = Command::new(&runner)
+        .args(["-input", "tests/qml/tst_HistoryView.qml"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("QT_QPA_PLATFORM", "offscreen")
-        .stdin(Stdio::piped())
+        .env("QT_QUICK_BACKEND", "software")
+        .output()?;
+    assert!(
+        layout.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&layout.stdout),
+        String::from_utf8_lossy(&layout.stderr)
+    );
+    let Some(bus) = isolated_desktop_bus()? else {
+        return Ok(());
+    };
+    let (copied_tx, copied_rx) = mpsc::channel();
+    let bridge = DesktopBridge::connect_at(Some(&bus.address), move |text| {
+        copied_tx
+            .send(text.to_string())
+            .map_err(|err| err.to_string())
+    })?;
+    bridge.update(|history| history.push_transcript("Full_Unicode 十\nsecond line"))?;
+    let mut client = Command::new(&runner)
+        .args(["-input", "tests/qml/tst_DaemonConnection.qml"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("DBUS_SESSION_BUS_ADDRESS", &bus.address)
+        .env("QT_QPA_PLATFORM", "offscreen")
+        .env("QT_QUICK_BACKEND", "software")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child.stdin.take().unwrap().write_all(
-        serde_json::to_string(
-            &serde_json::json!({"title":"SoundVibes: Idle", "transcripts":transcripts,"x":0,"y":0}),
-        )?
-        .as_bytes(),
-    )?;
-    let output = child.wait_with_output()?;
+    let first = copied_rx.recv_timeout(Duration::from_secs(6));
+    if first.is_ok() {
+        bridge.update(|history| history.set_activity(Activity::Listening))?;
+    }
+    let second = if first.is_ok() {
+        copied_rx.recv_timeout(Duration::from_secs(6))
+    } else {
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    };
+    drop(bridge);
+    if first.is_err() || second.is_err() {
+        let _ = client.kill();
+    }
+    let output = client.wait_with_output()?;
     assert!(
         output.status.success(),
-        "{}",
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let report: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(report["width"], 420);
-    assert!(report["height"].as_i64().unwrap() <= 560);
-    assert_eq!(report["horizontal_scroll_max"], 0);
-    assert!(report["vertical_scroll_max"].as_i64().unwrap() > 0);
-    assert_eq!(report["rows"].as_array().unwrap().len(), 10);
-    assert_eq!(report["rows"][0]["text"], text);
-    assert!(
-        report["rows"][0]["height"].as_i64().unwrap()
-            > report["rows"][0]["line_height"].as_i64().unwrap() * 3
-    );
-    assert!(
-        report["rows"][0]["height"].as_i64().unwrap()
-            >= report["rows"][0]["required_height"].as_i64().unwrap()
-    );
-    assert_eq!(report["rows"][0]["label_visible"], true);
-    assert!(
-        report["rows"][0]["label_height"].as_i64().unwrap()
-            >= report["rows"][0]["label_required_height"].as_i64().unwrap()
-    );
-    assert_eq!(report["selected"], 0);
-    Ok(())
-}
-
-// AT-42: Empty history is compact and dismissal does not select a recording.
-#[cfg(feature = "test-support")]
-#[test]
-fn history_popup_empty_state_has_no_selection() -> Result<(), Box<dyn Error>> {
-    use std::io::Write;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sv"))
-        .arg("tray-popup-inspect")
-        .env("QT_QPA_PLATFORM", "offscreen")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(br#"{"title":"SoundVibes: Idle","transcripts":[],"x":0,"y":0}"#)?;
-    let output = child.wait_with_output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(report["selected"], -1);
-    assert_eq!(report["rows"].as_array().unwrap().len(), 0);
-    assert!(report["height"].as_i64().unwrap() < 250);
-    assert_eq!(report["vertical_scroll_max"], 0);
+    assert_eq!(first?, "Full_Unicode 十\nsecond line");
+    assert_eq!(second?, "Full_Unicode 十\nsecond line");
     Ok(())
 }

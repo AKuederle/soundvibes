@@ -180,28 +180,36 @@ systemctl --user daemon-reload
 systemctl --user enable --now sv.service
 ```
 
-## KDE system tray
+## KDE Plasma widget
 
-`sv daemon start` adds a recording-dot icon in KDE Plasma: red while listening,
-amber while finishing transcription after release, and gray while idle. During
-continuous recording, the dot stays red even when segments are decoded in the
-background. Hover for the state, or click to open a 420-pixel-wide history popup.
-The ten most recent recordings appear newest first, with wrapped text and vertical
-scrolling. Very long words wrap too. Before the first recording, the popup
-explains that recordings will appear here. Click a recording to copy its full text to the clipboard
-using `wl-copy`.
+SoundVibes provides a native Plasma widget, hosted in the system tray like
+Klipper. Its red dot means listening, amber means processing final transcription,
+and gray means idle. The shell supplies popup placement, styling and dismissal.
 
-Each history entry contains a whole recording, combining the segments decoded
-between recording start and stop. The entry appears after the final segment has
-finished decoding, and clicking it copies the whole recording. Empty recordings
-are omitted. History includes completed text from all output modes. It stays in
-memory for the current daemon session and resets on restart. The tray uses its
-own colored dots and D-Bus StatusNotifierItem support. The history popup uses native Qt6
-Widgets in a child process of the same `sv` executable; building requires Qt6
-Widgets development files and desktop use requires the Qt6 Wayland platform
-plugin on Wayland. The tray waits for Plasma when the user service starts early and reconnects after the tray watcher restarts.
-If the session bus is unavailable, SoundVibes logs a warning and continues
-without the icon.
+Install or update the widget on Plasma 6 with the workspace D-Bus QML module:
+
+```bash
+mise run install-plasmoid
+# Without mise:
+bash scripts/install-plasmoid.sh
+```
+
+Start or restart `sv daemon start`. The widget is enabled by default in the
+system tray when the daemon is running. You can also find SoundVibes in Add
+Widgets or the system tray's Entries settings.
+
+Click the dot to see the ten latest complete recordings, newest first. Text
+wraps inside the native popup and long histories scroll vertically. Clicking a
+recording copies its whole text with `wl-copy`. The daemon serializes this with
+any dictation paste/restore operation. Each entry combines every segment between
+recording start and stop, including final words decoded after release. Empty
+recordings are omitted. History stays in memory and resets on daemon restart.
+
+The widget connects to the Rust daemon over the session D-Bus service
+`org.soundvibes.Daemon`. A standalone panel widget shows an offline state if the
+daemon stops; the system tray can hide the inactive service automatically.
+The daemon also works without Plasma or a session bus. No Qt Widgets window,
+separate popup process or C++ UI build is used.
 
 ## Development
 
